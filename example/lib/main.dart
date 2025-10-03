@@ -192,14 +192,20 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 12),
               ElevatedButton(
                 onPressed: _handleGetPublicKey,
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.blueGrey),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
                 child: const Text('Lấy Khóa Công Khai RSA'),
               ),
               const SizedBox(height: 12),
               // NÚT BẤM MỚI
               ElevatedButton(
                 onPressed: _handleGetCertificate,
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
                 child: const Text('Lấy Certificate'),
               ),
               if (_signatureHex.isNotEmpty)
@@ -250,10 +256,8 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ],
                 ),
-
             ],
           ),
-
         ),
       ),
     );

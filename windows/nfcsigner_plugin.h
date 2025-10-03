@@ -3,7 +3,7 @@
 
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
-
+#include <flutter/encodable_value.h>
 #include <memory>
 
 namespace nfcsigner {
@@ -19,11 +19,18 @@ class NfcsignerPlugin : public flutter::Plugin {
   // Disallow copy and assign.
   NfcsignerPlugin(const NfcsignerPlugin&) = delete;
   NfcsignerPlugin& operator=(const NfcsignerPlugin&) = delete;
-
+  private:
   // Called when a method is called on this plugin's channel from Dart.
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue> &method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+    // --- Các hàm helper cho PC/SC ---
+    void HandleSign(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+    void HandleGetPublicKey(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+    void HandleGetCertificate(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+    // Hàm helper để gửi APDU và tự động xử lý GET RESPONSE
+    std::vector<uint8_t> TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command);
 };
 
 }  // namespace nfcsigner

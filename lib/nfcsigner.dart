@@ -56,7 +56,7 @@ class Nfcsigner {
     }
   }
   /// Lấy khóa công khai RSA từ thẻ dựa trên vai trò của khóa.
-  
+
   static Future<ServiceResult<Uint8List>> getRsaPublicKey({
     required String appletID,
     required KeyRole keyRole,

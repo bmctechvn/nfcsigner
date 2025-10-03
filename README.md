@@ -3,7 +3,7 @@
 [![pub version](https://img.shields.io/pub/v/nfcsigner.svg)](https://pub.dev/packages/nfcsigner)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Một plugin Flutter để giao tiếp với thẻ thông minh BCard, hỗ trợ ký số, lấy khóa công khai và certificate qua NFC trên Android và iOS.
+Một plugin Flutter để giao tiếp với thẻ thông minh BCard, hỗ trợ ký số, lấy khóa công khai và certificate qua NFC trên Android, iOS và Windows.
 
 ## ✨ Tính năng
 

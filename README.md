@@ -3,7 +3,7 @@
 [![pub version](https://img.shields.io/pub/v/nfcsigner.svg)](https://pub.dev/packages/nfcsigner)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Một plugin Flutter để giao tiếp với thẻ thông minh chuẩn OpenPGP, hỗ trợ ký số, lấy khóa công khai và certificate qua NFC trên Android và iOS.
+Một plugin Flutter để giao tiếp với thẻ thông minh BCard, hỗ trợ ký số, lấy khóa công khai và certificate qua NFC trên Android và iOS.
 
 ## ✨ Tính năng
 
@@ -23,9 +23,16 @@ Thêm dependency này vào file `pubspec.yaml` của dự án Flutter của bạ
 
 ```yaml
 dependencies:
-  nfcsigner: ^1.0.0 # Thay bằng phiên bản mới nhất trên pub.dev
+  nfcsigner: ^0.0.1 # Thay bằng phiên bản mới nhất trên pub.dev
 ```
-
+Hoặc get package qua github:
+```yaml
+dependencies:  
+  nfcsigner:
+    git:
+      url: https://github.com/your-username/nfcsigner.git
+      ref: main # Hoặc một branch/tag cụ thể
+```
 Sau đó, chạy `flutter pub get`.
 
 ## 🛠 Cấu hình Bắt buộc

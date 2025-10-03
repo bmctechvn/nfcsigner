@@ -56,8 +56,7 @@ class Nfcsigner {
     }
   }
   /// Lấy khóa công khai RSA từ thẻ dựa trên vai trò của khóa.
-  ///
-  /// Thao tác này yêu cầu chọn Applet trước khi lấy khóa.
+  
   static Future<ServiceResult<Uint8List>> getRsaPublicKey({
     required String appletID,
     required KeyRole keyRole,
@@ -84,13 +83,17 @@ class Nfcsigner {
       );
     }
   }
-  /// Theo chuẩn OpenPGP, đối tượng Certificate được lưu với tag `7F21`.
+  /// Theo chuẩn BMC Card, đối tượng Certificate được lưu với tag `7F21`.
   static Future<ServiceResult<Uint8List>> getCertificate({
     required String appletID,
+    required KeyRole keyRole,
   }) async {
     try {
+      final String keyRoleString = keyRole.toString().split('.').last;
+
       final Map<String, dynamic> arguments = {
         'appletID': appletID,
+        'keyRole': keyRoleString,
       };
 
       final Uint8List? certificate = await _channel.invokeMethod('getCertificate', arguments);

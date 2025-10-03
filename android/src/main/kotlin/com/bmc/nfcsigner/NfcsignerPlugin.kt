@@ -177,7 +177,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   private fun handleGetCertificate(isoDep: IsoDep, call: MethodCall, result: Result) {
     try {
       val appletID = call.argument<String>("appletID")!!
-
+      val keyRole = call.argument<String>("keyRole")!!
       // Bước 1: Chọn Applet
       val selectResponse = transceiveAndGetResponse(isoDep, createSelectAppletCommand(hexStringToByteArray(appletID)))
       if (!isSuccess(selectResponse)) {
@@ -185,7 +185,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
         return
       }
       // BƯỚC 2: CHỌN DỮ LIỆU CERTIFICATE (Select Data)
-      val selectCertResponse = transceiveAndGetResponse(isoDep, createSelectCertificateCommand())
+      val selectCertResponse = transceiveAndGetResponse(isoDep, createSelectCertificateCommand(keyRole))
       if (!isSuccess(selectCertResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể chọn dữ liệu Certificate trên thẻ.", getStatusDetails(selectCertResponse))
         return
@@ -259,10 +259,17 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
     return byteArrayOf(cla, ins, p1, p2, lc) + data + byteArrayOf(le)
   }
-  private fun createSelectCertificateCommand(): ByteArray {
+  private fun createSelectCertificateCommand(keyRole: String): ByteArray {
     // Lệnh SELECT DATA theo đúng code C# bạn cung cấp.
     // Data: 60 04 5C 02 7F 21
-    val data = byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+    //val data = byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+    val data = when (keyRole) {
+      "sig" -> byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+      "dec" -> byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+      "aut" -> byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+      "sm" -> byteArrayOf(0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21)
+      else -> throw IllegalArgumentException("Vai trò khóa không hợp lệ: $keyRole")
+    }
     val lc = data.size.toByte()
     return byteArrayOf(0x00, 0xA5.toByte(), 0x02, 0x04, lc) + data + byteArrayOf(0x00)
   }

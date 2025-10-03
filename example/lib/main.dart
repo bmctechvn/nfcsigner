@@ -133,7 +133,8 @@ class _HomePageState extends State<HomePage> {
     });
 
     final result = await Nfcsigner.getCertificate(
-      appletID: 'D27600012401', // Thay bằng AID của bạn
+      appletID: 'D27600012401', // Applet ID
+      keyRole: KeyRole.sig, // Lấy Ceftificate của Signature
     );
 
     if (mounted) {

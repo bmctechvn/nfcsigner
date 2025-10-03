@@ -207,7 +207,8 @@ public class SwiftNfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionD
     }
     private func handleGetCertificate(tag: NFCISO7816Tag, session: NFCTagReaderSession) {
         guard let arguments = self.pendingCall?.arguments as? [String: Any],
-              let appletIDHex = arguments["appletID"] as? String else {
+              let appletIDHex = arguments["appletID"] as? String
+              let keyRole = arguments["keyRole"] as? String else {
             session.invalidate(errorMessage: "Tham số không hợp lệ.")
             self.pendingResult?(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
             self.cleanup()
@@ -226,7 +227,18 @@ public class SwiftNfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionD
                 return
             }
         // BƯỚC 2: TẠO VÀ GỬI LỆNH SELECT DATA
-            let selectCertData = Data([0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21])
+        var selectCertData: Data
+        switch keyRole {
+                        case "sig": selectCertData = Data([0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21])
+                        case "dec": selectCertData = Data([0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21])
+                        case "aut": selectCertData = Data([0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21])
+                        case "sm": selectCertData = Data([0x60, 0x04, 0x5C, 0x02, 0x7F, 0x21])
+                        default:
+                            session.invalidate(errorMessage: "Vai trò khóa không hợp lệ.")
+                            self.pendingResult?(FlutterError(code: "INVALID_PARAMETERS", message: "Vai trò khóa không hợp lệ: \(keyRole)", details: nil))
+                            self.cleanup()
+                            return
+                    }
             let selectCertAPDU = NFCISO7816APDU(instructionClass: 0x00, instructionCode: 0xA5, p1Parameter: 0x02, p2Parameter: 0x04, data: selectCertData, expectedResponseLength: 256)
 
             self.sendCommandAndGetResponse(tag: tag, apdu: selectCertAPDU) { (_, sw1, sw2, error) in

@@ -177,10 +177,10 @@ public class SwiftNfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionD
 
             var apduData: Data
             switch keyRole {
-                case "signature": apduData = Data([0xB6, 0x00])
-                case "decryption": apduData = Data([0xB8, 0x00])
-                case "authentication": apduData = Data([0xA4, 0x00])
-                case "secureMessaging": apduData = Data([0xA6, 0x00])
+                case "sig": apduData = Data([0xB6, 0x00])
+                case "dec": apduData = Data([0xB8, 0x00])
+                case "aut": apduData = Data([0xA4, 0x00])
+                case "sm": apduData = Data([0xA6, 0x00])
                 default:
                     session.invalidate(errorMessage: "Vai trò khóa không hợp lệ.")
                     self.pendingResult?(FlutterError(code: "INVALID_PARAMETERS", message: "Vai trò khóa không hợp lệ: \(keyRole)", details: nil))

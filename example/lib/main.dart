@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:nfcsigner/nfcsigner.dart';
 import 'package:nfcsigner/src/crypto_utils.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -38,7 +39,9 @@ class _HomePageState extends State<HomePage> {
   String _bytesToHexString(Uint8List bytes) {
     return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join('');
   }
-
+/*
+ * Phần giao tiếp dữ liệu Thẻ
+ */
   Future<void> _handleSignData() async {
     setState(() {
       _isSigning = true;
@@ -118,7 +121,7 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
-  // HÀM MỚI ĐỂ LẤY CERTIFICATE
+  // HÀM ĐỂ LẤY CERTIFICATE
   Future<void> _handleGetCertificate() async {
     setState(() {
       _isLoading = true;
@@ -152,6 +155,7 @@ class _HomePageState extends State<HomePage> {
       });
     }
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -245,6 +249,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ],
                 ),
+
             ],
           ),
 

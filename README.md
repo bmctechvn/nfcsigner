@@ -30,7 +30,7 @@ Hoặc get package qua github:
 dependencies:  
   nfcsigner:
     git:
-      url: https://github.com/your-username/nfcsigner.git
+      url: https://github.com/bmctechvn/nfcsigner.git
       ref: main # Hoặc một branch/tag cụ thể
 ```
 Sau đó, chạy `flutter pub get`.
@@ -150,4 +150,4 @@ class _MyCardScreenState extends State<MyCardScreen> {
 
 ## 🐛 Báo lỗi và Đóng góp
 
-Vui lòng tạo một issue trên kho [GitHub repository](https://github.com/bmctech.vn/nfcsigner/issues) để báo lỗi hoặc đề xuất tính năng mới.
+Vui lòng tạo một issue trên kho [GitHub repository](https://github.com/bmctechvn/nfcsigner/issues) để báo lỗi hoặc đề xuất tính năng mới.

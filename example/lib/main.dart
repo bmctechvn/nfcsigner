@@ -1,9 +1,16 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:nfcsigner/nfcsigner.dart';
-import 'package:nfcsigner/src/crypto_utils.dart';
+import 'package:open_filex/open_filex.dart';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() {
   runApp(const MyApp());
@@ -157,6 +164,111 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // --- HÀM MỚI ĐỂ TẠO VÀ KÝ PDF ---
+  Future<void> _handleSignPdf() async {
+    setState(() {
+      _isLoading = true;
+      _clearResults();
+      _statusMessage = 'Vui lòng chọn file PDF...';
+    });
+
+    // 1. Chọn file
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      withData: true, // Rất quan trọng: để lấy được nội dung file
+    );
+
+    if (result == null || result.files.single.bytes == null) {
+      setState(() { _isLoading = false; _statusMessage = 'Đã hủy chọn file.'; });
+      return;
+    }
+    final pdfBytes = result.files.single.bytes!;
+    final pdfDigestInfoBytes = createSha256DigestInfo(pdfBytes);
+    setState(() { _statusMessage = 'Đã chọn file. Vui lòng chạm thẻ để ký...'; });
+
+    // 2. Tạo cấu hình chữ ký (có thể lấy ảnh từ assets hoặc file)
+    final signatureConfig = PdfSignatureConfig(
+      x: 350.0,           // Vị trí từ trái
+      y: 700.0,          // Vị trí từ dưới
+      width: 250.0,      // Chiều rộng
+      height: 80.0,      // Chiều cao
+      pageNumber: 1,     // Trang số 1
+      contact: 'info@bmctech.vn',
+      signerName: 'BMC T&S JSC',
+      signatureImage: await _loadSignatureImage(), // Tùy chọn: load ảnh chữ ký
+    );
+    // 3. Gọi plugin để ký
+    final signResult = await Nfcsigner.signPdf(
+      pdfBytes: pdfBytes,
+      pdfHashBytes: pdfDigestInfoBytes,
+      appletID: 'D27600012401',
+      pin: '123456',
+      reason: 'Ký nháy!!!!',
+      location: 'Hanoi',
+      signatureConfig: signatureConfig, // TRUYỀN CẤU HÌNH VÀO
+    );
+
+    // 4. Xử lý kết quả
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _lastResult = signResult;
+        if (signResult.isSuccess && signResult.data != null) {
+          _statusMessage = 'Ký PDF thành công! Đang lưu file...';
+          // 4. Lưu file đã ký
+          _saveSignedPdf(signResult.data!);
+        } else {
+          _statusMessage = 'Lỗi: ${signResult.message}';
+        }
+      });
+    }
+  }
+
+  // HÀM _saveSignedPdf PHIÊN BẢN MỚI
+  Future<void> _saveSignedPdf(Uint8List signedBytes) async {
+    try {
+      // 1. Lấy thư mục tạm thời của ứng dụng
+      final tempDir = await getTemporaryDirectory();
+      final filePath = '${tempDir.path}/signed_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      final file = File(filePath);
+
+      // 2. Lưu file vào thư mục tạm thời
+      await file.writeAsBytes(signedBytes);
+      if (kDebugMode) {
+        print("Đã lưu file tạm thời tại: $filePath");
+      }
+
+      // 3. Dùng open_filex để MỞ file
+      final result = await OpenFilex.open(filePath);
+
+      // 4. Cập nhật trạng thái cho người dùng
+      setState(() {
+        _statusMessage = 'Ký thành công lưu file tại: $filePath';
+      });
+
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'Lỗi khi lưu hoặc mở file: ${e.toString()}';
+      });
+    }
+  }
+  // Hàm helper để reset trạng thái hiển thị
+  void _clearResults() {
+    setState(() {
+      _lastResult = null;
+    });
+  }
+  // Hàm tùy chọn để load ảnh chữ ký từ assets
+  Future<Uint8List?> _loadSignatureImage() async {
+    try {
+      final ByteData data = await rootBundle.load('assets/signature.png');
+      return data.buffer.asUint8List();
+    } catch (e) {
+      print('Không thể load ảnh chữ ký: $e');
+      return null;
+    }
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -208,6 +320,18 @@ class _HomePageState extends State<HomePage> {
                 ),
                 child: const Text('Lấy Certificate'),
               ),
+              const SizedBox(height: 16),
+              if (_isLoading)
+                const Center(child: CircularProgressIndicator())
+              else
+                ElevatedButton(
+                  onPressed: _handleSignPdf,
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.deepPurple,
+                      padding: const EdgeInsets.symmetric(vertical: 16)
+                  ),
+                  child: const Text('Tạo và Ký File PDF Mới'),
+                ),
               if (_signatureHex.isNotEmpty)
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,

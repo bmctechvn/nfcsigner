@@ -16,7 +16,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
   nfcsigner:
     # When depending on this package from a real application you should use:
     #   nfcsigner: ^x.y.z
@@ -24,6 +23,10 @@ dependencies:
     # The example app is bundled with the plugin so we use a path dependency on
     # the parent directory to use the current plugin's version.
     path: ../
+  file_picker: ^8.0.5
+  path_provider: ^2.1.3
+  open_filex: ^4.7.0
+
 dev_dependencies:
   integration_test:
     sdk: flutter
@@ -42,7 +45,8 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
-
+  assets:
+    - assets/signature.png
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.

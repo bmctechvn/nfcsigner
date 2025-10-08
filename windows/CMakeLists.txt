@@ -3,6 +3,9 @@
 # version, as doing so will cause the plugin to fail to compile for some
 # customers of the plugin.
 cmake_minimum_required(VERSION 3.14)
+# Set vcpkg root directory
+set(VCPKG_ROOT "D:/Projects/Software/Library/vcpkg")
+set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "Vcpkg toolchain file")
 
 # Project-level configuration.
 set(PROJECT_NAME "nfcsigner")
@@ -22,6 +25,28 @@ list(APPEND PLUGIN_SOURCES
   "nfcsigner_plugin.h"
 )
 
+# --- TÌM KIẾM CÁC THƯ VIỆN ĐÃ CÀI ĐẶT QUA VCPKG ---
+set(HAVE_PODOFO TRUE)
+set(PODOFO_INCLUDE_DIR "D:/Projects/Software/Library/vcpkg/installed/x64-windows/include/")
+set(PODOFO_LIBRARY "D:/Projects/Software/Library/vcpkg/installed/x64-windows/lib/podofo.lib")
+if(EXISTS "${PODOFO_INCLUDE_DIR}/podofo/podofo.h" AND EXISTS "${PODOFO_LIBRARY}")
+    message(STATUS "Found podofo directly")
+    # Tạo target thủ công
+    add_library(podofo STATIC IMPORTED)
+    set_target_properties(podofo PROPERTIES
+            IMPORTED_LOCATION "${PODOFO_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${PODOFO_INCLUDE_DIR}"
+    )
+else()
+    message(WARNING "podofo not found - using raw data mode")
+    set(HAVE_PODOFO FALSE)
+endif()
+
+# Tìm OpenSSL
+find_package(OpenSSL REQUIRED)
+# --------------------------------------------------
+
+
 # Define the plugin library target. Its name must not be changed (see comment
 # on PLUGIN_NAME above).
 add_library(${PLUGIN_NAME} SHARED
@@ -29,6 +54,7 @@ add_library(${PLUGIN_NAME} SHARED
   "nfcsigner_plugin_c_api.cpp"
   ${PLUGIN_SOURCES}
 )
+
 
 # Apply a standard set of build settings that are configured in the
 # application-level CMakeLists.txt. This can be removed for plugins that want
@@ -46,7 +72,24 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 # dependencies here.
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin Winscard)
+
+target_include_directories(${PLUGIN_NAME} PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        # Thêm đường dẫn include cho PoDoFo và OpenSSL
+        ${PODOFO_INCLUDE_DIRS}
+        ${OPENSSL_INCLUDE_DIRS}
+)
+if(HAVE_PODOFO)
+    target_compile_definitions(${PLUGIN_NAME} PRIVATE HAVE_PODOFO)
+    target_link_libraries(${PLUGIN_NAME} PRIVATE podofo)
+endif()
+target_link_libraries(${PLUGIN_NAME} PRIVATE
+        flutter
+        flutter_wrapper_plugin
+        Winscard
+        OpenSSL::SSL
+        OpenSSL::Crypto
+)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

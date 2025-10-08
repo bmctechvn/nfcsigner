@@ -12,8 +12,24 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import java.io.IOException
+// Import các lớp mới của iText 8
+import com.itextpdf.kernel.pdf.PdfReader
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.security.GeneralSecurityException
+import java.security.Security
+import java.security.cert.Certificate
+import java.security.cert.CertificateFactory
+import com.itextpdf.kernel.pdf.StampingProperties
+import com.itextpdf.signatures.*
+import org.bouncycastle.asn1.ASN1InputStream
+import org.bouncycastle.asn1.ASN1Primitive
+import org.bouncycastle.cert.X509CertificateHolder
+import java.security.cert.X509Certificate
+import com.itextpdf.io.image.ImageDataFactory
+
 
 class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdapter.ReaderCallback {
   private lateinit var channel: MethodChannel
@@ -21,7 +37,15 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   private var currentActivity: Activity? = null
   private var pendingCall: MethodCall? = null
   private var pendingResult: Result? = null
-
+  companion object {
+    init {
+      // Đảm bảo Bouncy Castle Provider được đăng ký một lần duy nhất
+      // ngay khi lớp được nạp.
+      if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+        Security.addProvider(BouncyCastleProvider())
+      }
+    }
+  }
   override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "nfcsigner")
     channel.setMethodCallHandler(this)
@@ -67,6 +91,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
         "generateSignature" -> handleGenerateSignature(isoDep, call, result)
         "getRsaPublicKey" -> handleGetRsaPublicKey(isoDep, call, result)
         "getCertificate" -> handleGetCertificate(isoDep, call, result)
+        "signPdf" -> handleSignPdf(isoDep, call, result)
         else -> result.notImplemented()
       }
     } catch (e: Exception) {
@@ -327,4 +352,231 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   override fun onDetachedFromActivity() { currentActivity = null }
   override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) { onAttachedToActivity(binding) }
   override fun onDetachedFromActivityForConfigChanges() { onDetachedFromActivity() }
+
+  // --- HÀM XỬ LÝ KÝ PDF ĐÃ CẬP NHẬT CHO ITEXT 7 ---
+  private fun handleSignPdf(isoDep: IsoDep, call: MethodCall, result: Result) {
+    val pdfBytes = call.argument<ByteArray>("pdfBytes")!!
+    val appletID = call.argument<String>("appletID")!!
+    val pin = call.argument<String>("pin")!!
+    val keyIndex = call.argument<Int>("keyIndex")!!
+    val reason = call.argument<String>("reason")!!
+    val location = call.argument<String>("location")!!
+    val pdfHashBytes = call.argument<ByteArray>("pdfHashBytes")!!
+
+    // Nhận các tham số chữ ký
+    val signatureConfig = call.argument<Map<String, Any>>("signatureConfig")
+    val x = (signatureConfig?.get("x") as? Double)?.toFloat() ?: 36f
+    val y = (signatureConfig?.get("y") as? Double)?.toFloat() ?: 700f
+    val width = (signatureConfig?.get("width") as? Double)?.toFloat() ?: 200f
+    val height = (signatureConfig?.get("height") as? Double)?.toFloat() ?: 50f
+    val pageNumber = signatureConfig?.get("pageNumber") as? Int ?: 1
+    val signatureImageBytes = signatureConfig?.get("signatureImage") as? ByteArray
+    val contact = signatureConfig?.get("contact") as? String
+    val signerName = signatureConfig?.get("signerName") as? String
+
+    try {
+      Security.addProvider(BouncyCastleProvider())
+      // --- Bước 1: Chọn Applet và Xác thực PIN ---
+      val selectResponse = transceiveAndGetResponse(isoDep, createSelectAppletCommand(hexStringToByteArray(appletID)))
+      if (!isSuccess(selectResponse)) {
+        result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", getStatusDetails(selectResponse))
+        return
+      }
+      println("DEBUG: Verifying PIN before signing...")
+      val verifyResponse = transceiveAndGetResponse(isoDep, createVerifyPinCommand(pin))
+      if (!isSuccess(verifyResponse)) {
+        result.error("AUTH_ERROR", "Xác thực PIN thất bại.", getStatusDetails(verifyResponse))
+        return
+      }
+      println("DEBUG: PIN verification successful")
+
+      // --- Bước 2: Lấy Certificate từ thẻ ---
+      val keyRole = "sig" // Mặc định lấy certificate cho khóa ký
+      val selectCertResponse = transceiveAndGetResponse(isoDep, createSelectCertificateCommand(keyRole))
+      if (!isSuccess(selectCertResponse)) {
+        result.error("OPERATION_NOT_SUPPORTED", "Không thể chọn dữ liệu Certificate trên thẻ.", getStatusDetails(selectCertResponse))
+        return
+      }
+
+      // Bước lấy certificate
+      val certResponse = transceiveAndGetResponse(isoDep, createGetCertificateCommand())
+      if (!isSuccess(certResponse)) {
+        result.error("OPERATION_NOT_SUPPORTED", "Không thể lấy certificate.", getStatusDetails(certResponse))
+        return
+      }
+      val certificateBytes = getData(certResponse)
+
+      // KIỂM TRA CERTIFICATE CÓ RỖNG KHÔNG
+      if (certificateBytes.isEmpty()) {
+        result.error("EMPTY_CERTIFICATE", "Certificate nhận được từ thẻ là rỗng.", null)
+        return
+      }
+
+      val certFactory = CertificateFactory.getInstance("X.509")
+      val certificate = parseCertificateSimple(certificateBytes)
+      //certFactory.generateCertificate(ByteArrayInputStream(certificateBytes))
+      if (certificate != null) {
+        println("DEBUG: Certificate parsed successfully!")
+        println("DEBUG: Subject: ${certificate.subjectDN}")
+        println("DEBUG: Issuer: ${certificate.issuerDN}")
+        //return certificate
+      }
+      else {
+        println("DEBUG: Certificate NULL!")
+      }
+      val certificateChain = arrayOf<Certificate>(certificate as Certificate)
+
+      // --- Bước 3: Chuẩn bị ký với iText 7 ---
+      val reader = PdfReader(ByteArrayInputStream(pdfBytes))
+      val signedPdfStream = ByteArrayOutputStream()
+
+      // Sử dụng StampingProperties cho iText 7
+      val stampingProperties = StampingProperties().useAppendMode()
+      val signer = PdfSigner(reader, signedPdfStream, stampingProperties)
+
+      val pageRect = com.itextpdf.kernel.geom.Rectangle(x, y, width, height)
+      val appearance = signer.signatureAppearance
+
+      appearance
+        .setReason(reason)
+        .setLocation(location)
+        .setPageRect(pageRect)
+        .setPageNumber(pageNumber)
+        .setReuseAppearance(false)
+
+      // THÊM THÔNG TIN LIÊN HỆ VÀ TÊN NGƯỜI KÝ NẾU CÓ
+      contact?.let { appearance.setContact(it) }
+      signerName?.let {
+        // Có thể cần custom implementation để hiển thị tên
+        println("DEBUG: Signer name: $it")
+      }
+      // THÊM ẢNH CHỮ KÝ NẾU CÓ
+      if (signatureImageBytes != null) {
+        try {
+          println("DEBUG: Setting signature image, size: ${signatureImageBytes.size} bytes")
+          val imageData = com.itextpdf.io.image.ImageDataFactory.create(signatureImageBytes)
+          appearance.setSignatureGraphic(imageData)
+
+          // Thiết lập cách hiển thị: GRAPHIC (chỉ ảnh), GRAPHIC_AND_DESCRIPTION (ảnh + mô tả)
+          appearance.renderingMode = com.itextpdf.signatures.PdfSignatureAppearance.RenderingMode.GRAPHIC_AND_DESCRIPTION
+
+        } catch (e: Exception) {
+          println("DEBUG: Failed to set signature image: ${e.message}")
+          // Tiếp tục không có ảnh nếu có lỗi
+        }
+      }
+      // Implementation IExternalSignature cho iText 7
+      val externalSignature = object : IExternalSignature {
+        override fun getHashAlgorithm(): String = "SHA-256"
+
+        override fun getEncryptionAlgorithm(): String = "RSA"
+
+        override fun sign(message: ByteArray): ByteArray {
+          val hash = pdfHashBytes
+          //extractHashManually(message)
+          println("DEBUG: Starting sign process, message length: ${hash.size}")
+
+          // Tạo DigestInfo cho SHA-256
+          //val digestInfo = createSha256DigestInfo(message)
+          //println("DEBUG: DigestInfo created, length: ${hash.size}")
+
+          // Ký dữ liệu trên thẻ
+          val signResponse = transceiveAndGetResponse(isoDep, createComputeSignatureCommand(hash, keyIndex))
+          if (!isSuccess(signResponse)) {
+            val (sw1, sw2) = getStatusWords(signResponse)
+            throw GeneralSecurityException("Ký trên thẻ thất bại. Mã SW: ${sw1.toString(16)}${sw2.toString(16)}")
+          }
+
+          val signatureBytes = getData(signResponse)
+          println("DEBUG: Signature received, length: ${signatureBytes.size}")
+
+          return signatureBytes
+        }
+      }
+
+      // --- Bước 4: Thực hiện ký ---
+      println("DEBUG: Starting PDF signing process...")
+      try {
+        signer.signDetached(
+          BouncyCastleDigest(),
+          externalSignature,
+          certificateChain,
+          null,
+          null,
+          null,
+          0,
+          PdfSigner.CryptoStandard.CMS
+        )
+        println("DEBUG: PDF signing completed successfully!")
+      } catch (e: Exception) {
+        println("DEBUG: Error during PDF signing: ${e.message}")
+        e.printStackTrace()
+        throw e
+      }
+      // --- Bước 5: Trả về file PDF đã ký ---
+      result.success(signedPdfStream.toByteArray())
+
+    } catch (e: Exception) {
+      result.error("PDF_SIGN_ERROR", "Lỗi khi ký PDF: ${e.message}", null)
+    }
+  }
+
+  private fun parseCertificateSimple(certificateBytes: ByteArray): X509Certificate? {
+    return try {
+      // Sử dụng Bouncy Castle implementation
+      val certificateFactory = CertificateFactory.getInstance("X.509", BouncyCastleProvider())
+      certificateFactory.generateCertificate(ByteArrayInputStream(certificateBytes)) as X509Certificate
+    } catch (e: Exception) {
+      println("DEBUG: Bouncy Castle provider failed: ${e.message}")
+      try {
+        // Fallback to system provider
+        val certificateFactory = CertificateFactory.getInstance("X.509")
+        certificateFactory.generateCertificate(ByteArrayInputStream(certificateBytes)) as X509Certificate
+      } catch (e2: Exception) {
+        println("DEBUG: System provider also failed: ${e2.message}")
+        null
+      }
+    }
+  }
+
+  // Fallback method nếu parse ASN.1 thất bại
+  private fun extractHashManually(digestInfo: ByteArray): ByteArray {
+    println("DEBUG: Trying manual hash extraction...")
+
+    // Tìm vị trí của OCTET_STRING tag (0x04) và length
+    for (i in 0 until digestInfo.size - 2) {
+      if (digestInfo[i] == 0x04.toByte()) {
+        val length = digestInfo[i + 1].toInt() and 0xFF
+
+        // Kiểm tra xem length có hợp lý cho SHA-256 hash (32 bytes) không
+        if (length == 32 && i + 2 + length <= digestInfo.size) {
+          val hash = digestInfo.copyOfRange(i + 2, i + 2 + length)
+          println("DEBUG: Manually extracted hash: ${hash.size} bytes")
+          return createSha256DigestInfo(hash)
+        }
+      }
+    }
+
+    // Nếu không tìm thấy, trả về 32 bytes cuối (giả định là hash)
+    //println("DEBUG: Using last 32 bytes as hash (fallback)")
+    return createSha256DigestInfo(digestInfo.takeLast(32).toByteArray())
+  }
+  // Hàm helper tạo DigestInfo (chuyển từ Dart sang Kotlin)
+  private fun createSha256DigestInfo(hash: ByteArray): ByteArray {
+    // Kiểm tra kích thước hash
+    if (hash.size != 32) {
+      println("DEBUG: WARNING - Hash size is ${hash.size}, expected 32 for SHA-256")
+    }
+
+    // DigestInfo prefix cho SHA-256
+    val sha256DigestInfoPrefix = byteArrayOf(
+      0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86.toByte(),
+      0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+    )
+
+    println("DEBUG: Creating DigestInfo - hash length: ${hash.size}")
+    println("DEBUG: DigestInfo prefix length: ${sha256DigestInfoPrefix.size}")
+
+    return sha256DigestInfoPrefix + hash
+  }
 }

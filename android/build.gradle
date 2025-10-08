@@ -50,6 +50,10 @@ android {
     dependencies {
         testImplementation("org.jetbrains.kotlin:kotlin-test")
         testImplementation("org.mockito:mockito-core:5.0.0")
+        implementation 'com.itextpdf:itext7-core:7.2.5'
+        implementation 'com.itextpdf:kernel:7.2.5'
+        implementation 'com.itextpdf:sign:7.2.5'
+        implementation 'org.bouncycastle:bcprov-jdk15on:1.70'
     }
 
     testOptions {

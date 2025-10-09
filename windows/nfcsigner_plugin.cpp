@@ -350,6 +350,8 @@ void NfcsignerPlugin::HandleMethodCall(
                 }
                 double x = 50.0, y = 700.0, width = 200.0, height = 50.0;
                 int pageNumber = 1;
+                std::string contact = "info@bmctech.vn";
+                std::string signerName = "BMC T&S JSC";
 
                 auto config_iter = args->find(flutter::EncodableValue("signatureConfig"));
                 if (config_iter != args->end()) {
@@ -360,12 +362,16 @@ void NfcsignerPlugin::HandleMethodCall(
                     auto width_iter = signatureConfig.find(flutter::EncodableValue("width"));
                     auto height_iter = signatureConfig.find(flutter::EncodableValue("height"));
                     auto page_iter = signatureConfig.find(flutter::EncodableValue("pageNumber"));
+                    auto contact_iter = signatureConfig.find(flutter::EncodableValue("contact"));
+                    auto signerName_iter = signatureConfig.find(flutter::EncodableValue("signerName"));
 
                     if (x_iter != signatureConfig.end()) x = std::get<double>(x_iter->second);
                     if (y_iter != signatureConfig.end()) y = std::get<double>(y_iter->second);
                     if (width_iter != signatureConfig.end()) width = std::get<double>(width_iter->second);
                     if (height_iter != signatureConfig.end()) height = std::get<double>(height_iter->second);
                     if (page_iter != signatureConfig.end()) pageNumber = std::get<int>(page_iter->second);
+                    if (contact_iter != signatureConfig.end()) contact = std::get<std::string>(contact_iter->second);
+                    if (signerName_iter != signatureConfig.end()) signerName = std::get<std::string>(signerName_iter->second);
                 }
 
                 // 2. Giao tiếp với thẻ để lấy Certificate
@@ -407,15 +413,63 @@ void NfcsignerPlugin::HandleMethodCall(
                 std::cout << "=== Starting set some signature parameters===" << std::endl;
                 signatureField.SetSignatureReason(PoDoFo::PdfString(reason));
                 signatureField.SetSignatureLocation(PoDoFo::PdfString(location));
+                signatureField.SetSignerName(PoDoFo::PdfString(signerName));
+                //signatureField.SetSignatureDate(PoDoFo::PdfDate(now_time));
+                // ======================== TẠO HÌNH ẢNH HIỂN THỊ - PHIÊN BẢN SỬA LỖI ========================
+
+                // Vì PdfSignature và PdfAnnotationWidget thực chất là cùng một đối tượng PDF,
+                // chúng ta có thể tìm widget bằng cách so sánh đối tượng gốc.
+                /*
+                PoDoFo::PdfAnnotation* pAnnotation = nullptr;
+                for (auto& annotation : page.GetAnnotations()) {
+                    if (annotation && annotation->GetObject() == signatureField.GetObject()) {
+                        pAnnotation = annotation.get();
+                        break;
+                    }
+                }
+
+                if (pAnnotation) {
+                    auto* widget = static_cast<PoDoFo::PdfAnnotationWidget*>(pAnnotation);
+                    auto& xobject = document.CreateFormXObject(widget->GetRect());
+                    PoDoFo::PdfPainter painter;
+                    painter.SetCanvas(xobject);
+
+                    const double sig_height = widget->GetRect().GetHeight();
+                    painter.Rectangle(0, 0, widget->GetRect().GetWidth(), sig_height);
+                    painter.Stroke();
+
+                    auto* fontBold = document.GetFonts().SearchFont("Helvetica-Bold");
+                    auto* fontRegular = document.GetFonts().SearchFont("Helvetica");
+
+                    std::string line1 = signerName;
+                    std::string line2 = reason;
+
+                    if (fontBold) {
+                        painter.TextState.SetFont(*fontBold, 10);
+                        painter.DrawText(line1, 5, sig_height - 14);
+                    }
+
+                    if (fontRegular) {
+                        painter.TextState.SetFont(*fontRegular, 8);
+                        painter.DrawText(line2, 5, sig_height - 28);
+                        painter.DrawText(line3, 5, sig_height - 40);
+                    }
+
+                    painter.FinishDrawing();
+                    widget->SetAppearanceStream(&xobject);
+                }
+                 */
+                // ===========================================================================================
+
+
                 std::cout << "=== Successfully set signature reason/location ===" << std::endl;
 
                 // 4. Cấu hình PdfSignerCms với callback để ký bằng thẻ
                 std::cout << "=== Cấu hình PdfSignerCms với callback để ký bằng thẻ ===" << std::endl;
                 PoDoFo::PdfSignerCmsParams params;
-                params.SignatureType = PoDoFo::PdfSignatureType::PAdES_B;
-                params.Encryption = PoDoFo::PdfSignatureEncryption::RSA;
+                //params.SignatureType = PoDoFo::PdfSignatureType::Adobe.PPKLite;
+                //params.Encryption = PoDoFo::PdfSignatureEncryption::RSA;
                 params.Hashing = PoDoFo::PdfHashingAlgorithm::SHA256;
-                params.SigningTimeUTC = std::chrono::seconds(std::time(nullptr));
                 params.Flags = PoDoFo::PdfSignerCmsFlags::ServiceDoDryRun;
 
                 //params.SignedHashHandler = [&](PoDoFo::bufferview signedHash, bool dryrun) {
@@ -428,14 +482,14 @@ void NfcsignerPlugin::HandleMethodCall(
                     if (dryrun) {
                         // Lần 1: Báo cho PoDoFo kích thước cần thiết. Thao tác resize ở đây là ĐÚNG.
                         std::cout << "Dry run: Informing PoDoFo that signature will be " << signatureSize << " bytes." << std::endl;
-                        //signedHash.resize(signatureSize);
-                        //std::cout << "<-- Exiting SigningService (Dry run complete)." << std::endl;
-                        //return;
+                        signedHash.resize(signatureSize);
+                        std::cout << "<-- Exiting SigningService (Dry run complete)." << std::endl;
+                        return;
                     }
 
                     // Lần 2: Lấy chữ ký thật và điền vào bộ đệm đã được cấp phát sẵn.
                     // 1. Lấy dữ liệu PoDoFo cung cấp và tính hash SHA-256
-
+                    /*
                     std::vector<uint8_t> digest(SHA256_DIGEST_LENGTH);
                     SHA256(reinterpret_cast<const unsigned char*>(hashToSign.data()), hashToSign.size(), digest.data());
 
@@ -446,7 +500,7 @@ void NfcsignerPlugin::HandleMethodCall(
                     };
                     std::vector<uint8_t> data_to_send_to_card = digestInfoPrefix;
                     data_to_send_to_card.insert(data_to_send_to_card.end(), digest.begin(), digest.end());
-
+                    */
                     std::cout << "Real run: Getting signature from card..." << std::endl;
                     auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(data_to_send_to_card, keyIndex));
                     if (sign_resp.size() < 2 || sign_resp[sign_resp.size() - 2] != 0x90) {
@@ -458,21 +512,15 @@ void NfcsignerPlugin::HandleMethodCall(
                     std::cout << "Real run: PoDoFo provided a buffer of size " << signedHash.size() << " bytes." << std::endl;
                     // Kiểm tra an toàn: đảm bảo bộ đệm PoDoFo cấp phát đủ lớn.
                     if (signedHash.size() < signature_raw.size()) {
-                        //throw std::runtime_error("PoDoFo allocated a buffer that is too small for the actual signature.");
+                        throw std::runtime_error("PoDoFo allocated a buffer that is too small for the actual signature.");
                     }
 
                     std::cout << "Real run: Copying " << signature_raw.size() << " signature bytes into the buffer." << std::endl;
                     if (!signature_raw.empty()) {
                         //signedHash.resize(signature_raw.size());
-                        //signedHash.assign(signature_raw.begin(), signature_raw.end());
-                        //signedHash = signature_raw;
+                        signedHash.assign(signature_raw.begin(), signature_raw.end());
                         //memcpy(signedHash.data(), signature_raw.data(), signature_raw.size());
-                        signedHash.clear();
-                        for (uint8_t byte : signature_raw) {
-                            signedHash.push_back(static_cast<char>(byte));
-                        }
                     }
-
                     std::cout << "<-- Exiting SigningService (Real run complete)." << std::endl;
                 };
                 // Tạo đối tượng signer
@@ -484,7 +532,7 @@ void NfcsignerPlugin::HandleMethodCall(
                 std::cout << "=== Tạo đối tượng signer Successfully ===" << std::endl;
                 // 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn
                 std::cout << "=== 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn ===" << std::endl;
-                std::vector<char> buffer;
+                std::vector<char> buffer(pdfBytes.begin(), pdfBytes.end());
                 PoDoFo::VectorStreamDevice outputDevice(buffer);
                 PoDoFo::SignDocument(document, outputDevice, signer, signatureField);
                 std::cout << "=== 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn END ===" << std::endl;

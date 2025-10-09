@@ -1,5 +1,5 @@
 # Project-level configuration.
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.23)
 # Đảm bảo đường dẫn này chính xác đến thư mục vcpkg của bạn
 set(CMAKE_TOOLCHAIN_FILE "D:/Projects/Software/Library/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "Vcpkg toolchain file")
 project(nfcsigner_example LANGUAGES CXX)

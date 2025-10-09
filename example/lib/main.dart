@@ -204,9 +204,10 @@ class _HomePageState extends State<HomePage> {
       pdfHashBytes: pdfDigestInfoBytes,
       appletID: 'D27600012401',
       pin: '123456',
-      reason: 'Ký nháy!!!!',
+      reason: 'Ky nhay tam thoi',
       location: 'Hanoi',
       signatureConfig: signatureConfig, // TRUYỀN CẤU HÌNH VÀO
+      signatureLength: 512,
     );
 
     // 4. Xử lý kết quả

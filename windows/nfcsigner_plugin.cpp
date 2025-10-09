@@ -12,14 +12,18 @@
 #include <memory>
 #include <sstream>
 #include <iostream>
+#include <string>
 #include <podofo/auxiliary/Version.h>
 
 #ifdef HAVE_PODOFO
 // Include PoDoFo và OpenSSL
 #include <podofo/podofo.h>
+#include <podofo/main/PdfSigner.h>
+#include <podofo/main/PdfMemDocument.h>
+#include <podofo/main/PdfSignature.h>
+#include <podofo/main/PdfPage.h>
 #include <openssl/sha.h>
 #include <openssl/x509.h>
-#include <openssl/pkcs7.h>
 #include <openssl/cms.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
@@ -46,6 +50,19 @@ namespace nfcsigner {
             bytes.push_back(byte);
         }
         return bytes;
+    }
+    template<typename T>
+    std::string ToHexString(const T& data) {
+        const char hex_chars[] = "0123456789abcdef";
+        std::string hex_str;
+        hex_str.reserve(data.size() * 2); // Cấp phát sẵn bộ nhớ để tăng hiệu quả
+
+        for (unsigned char byte : data) {
+            hex_str += hex_chars[(byte >> 4) & 0x0F]; // Ký tự cho 4 bit cao
+            hex_str += hex_chars[byte & 0x0F];        // Ký tự cho 4 bit thấp
+        }
+
+        return hex_str;
     }
     std::vector<uint8_t> CreateSelectAppletCommand(const std::string& appletID) {
         auto appletID_bytes = HexToBytes(appletID);
@@ -99,99 +116,7 @@ namespace nfcsigner {
     std::vector<uint8_t> CreateGetCertificateCommand() {
         return { 0x00, 0xCA, 0x7F, 0x21, 0x00 };
     }
-#ifdef HAVE_PODOFO
-// Helper function to create a detached PKCS#7/CMS signature container
-/*
-std::vector<uint8_t> CreateCMSContainer(
-    const std::vector<uint8_t>& dataToSign,
-    const std::vector<uint8_t>& certificate_der,
-    const std::vector<uint8_t>& signature_raw)
-{
-    // Load certificate
-    const unsigned char* p_cert = certificate_der.data();
-    X509* cert = d2i_X509(NULL, &p_cert, certificate_der.size());
-    if (!cert) {
-        throw std::runtime_error("Failed to parse X509 certificate from DER.");
-    }
 
-    // Create a BIO for the data to be signed (will be hashed)
-    BIO* data_bio = BIO_new_mem_buf(dataToSign.data(), dataToSign.size());
-    if (!data_bio) {
-        X509_free(cert);
-        throw std::runtime_error("Failed to create BIO for data.");
-    }
-
-    // Create CMS SignedData structure
-    int flags = CMS_BINARY | CMS_NOSMIMECAP | CMS_DETACHED | CMS_PARTIAL;
-    CMS_ContentInfo* cms = CMS_sign(NULL, NULL, NULL, data_bio, flags);
-    if (!cms) {
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to create CMS_ContentInfo.");
-    }
-
-    // Add signer info
-    CMS_SignerInfo* si = CMS_add1_signer(cms, cert, NULL, EVP_sha256(), flags);
-    if (!si) {
-        CMS_ContentInfo_free(cms);
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to add signer to CMS.");
-    }
-
-    // Finalize the structure to get the SignedAttributes digest
-    if (CMS_final(cms, data_bio, NULL, flags) <= 0) {
-        CMS_ContentInfo_free(cms);
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to finalize CMS structure.");
-    }
-
-    // SỬA: Thay thế CMS_SignerInfo_set1_signature bằng cách sử dụng CMS_SignerInfo_sign
-    // Set the raw signature value bằng cách sử dụng hàm thay thế
-    ASN1_OCTET_STRING* sig_octet = ASN1_OCTET_STRING_new();
-    if (!sig_octet) {
-        CMS_ContentInfo_free(cms);
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to create ASN1_OCTET_STRING for signature.");
-    }
-
-    if (!ASN1_OCTET_STRING_set(sig_octet, signature_raw.data(), signature_raw.size())) {
-        ASN1_OCTET_STRING_free(sig_octet);
-        CMS_ContentInfo_free(cms);
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to set signature value in ASN1_OCTET_STRING.");
-    }
-
-    // Sử dụng CMS_SignerInfo_set0_signature để thiết lập chữ ký
-    CMS_SignerInfo_set0_signature(si, sig_octet);
-
-    // Convert CMS to DER format
-    BIO* out_bio = BIO_new(BIO_s_mem());
-    if (!i2d_CMS_bio(out_bio, cms)) {
-        BIO_free(out_bio);
-        CMS_ContentInfo_free(cms);
-        BIO_free(data_bio);
-        X509_free(cert);
-        throw std::runtime_error("Failed to serialize CMS to DER.");
-    }
-
-    // Extract DER data into vector
-    char* der_ptr;
-    long der_len = BIO_get_mem_data(out_bio, &der_ptr);
-    std::vector<uint8_t> cms_der(der_ptr, der_ptr + der_len);
-
-    // Cleanup
-    BIO_free(out_bio);
-    CMS_ContentInfo_free(cms);
-    BIO_free(data_bio);
-    X509_free(cert);
-
-    return cms_der;
-}*/
-#endif
 // static
 void NfcsignerPlugin::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows *registrar) {
@@ -416,6 +341,7 @@ void NfcsignerPlugin::HandleMethodCall(
                 auto keyIndex = std::get<int>(args->at(flutter::EncodableValue("keyIndex")));
                 auto reason = std::get<std::string>(args->at(flutter::EncodableValue("reason")));
                 auto location = std::get<std::string>(args->at(flutter::EncodableValue("location")));
+                auto signatureLength = std::get<int>(args->at(flutter::EncodableValue("signatureLength")));
 
                 // Lấy DigestInfo bạn đã cung cấp
                 auto data_to_send_to_card = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("pdfHashBytes")));
@@ -463,22 +389,12 @@ void NfcsignerPlugin::HandleMethodCall(
 
                 // 3. Chuẩn bị tài liệu PDF và trường chữ ký bằng PoDoFo API mới
                 std::cout << "Loading PDF document..." << std::endl;
-// Tạm thời thay thế phần load PDF bằng việc tạo PDF đơn giản
-#ifdef TEST_SIMPLE_PDF
-                PoDoFo::PdfMemDocument document;
-                auto& page = document.GetPages().CreatePage(PoDoFo::PageSize::A4);
-                auto& font = document.GetFonts().GetStandard14Font(PoDoFo::PdfStandard14FontType::Helvetica);
 
-                // Thêm một dòng text đơn giản
-                auto& canvas = page.GetCanvas();
-                canvas.DrawText("Test Document for Signing", 100, 700, font);
-#else
                 // Code load PDF hiện tại
                 PoDoFo::PdfMemDocument document;
                 document.LoadFromBuffer(PoDoFo::bufferview(
                         reinterpret_cast<const char*>(pdfBytes.data()), pdfBytes.size()
                 ));
-#endif
                 std::cout << "PDF loaded successfully. Page count: " << document.GetPages().GetCount() << std::endl;
 
                 PoDoFo::PdfPage& page = document.GetPages().GetPageAt(pageNumber > 0 ? pageNumber - 1 : 0);
@@ -489,43 +405,89 @@ void NfcsignerPlugin::HandleMethodCall(
                         "Signature", PoDoFo::Rect(x, y, width, height)
                 );
                 std::cout << "=== Starting set some signature parameters===" << std::endl;
-               // signatureField.SetSignatureReason(PoDoFo::PdfString(reason));
-               // signatureField.SetSignatureLocation(PoDoFo::PdfString(location));
+                signatureField.SetSignatureReason(PoDoFo::PdfString(reason));
+                signatureField.SetSignatureLocation(PoDoFo::PdfString(location));
+                std::cout << "=== Successfully set signature reason/location ===" << std::endl;
 
                 // 4. Cấu hình PdfSignerCms với callback để ký bằng thẻ
                 std::cout << "=== Cấu hình PdfSignerCms với callback để ký bằng thẻ ===" << std::endl;
                 PoDoFo::PdfSignerCmsParams params;
+                params.SignatureType = PoDoFo::PdfSignatureType::PAdES_B;
+                params.Encryption = PoDoFo::PdfSignatureEncryption::RSA;
+                params.Hashing = PoDoFo::PdfHashingAlgorithm::SHA256;
+                params.SigningTimeUTC = std::chrono::seconds(std::time(nullptr));
+                params.Flags = PoDoFo::PdfSignerCmsFlags::ServiceDoDryRun;
 
-                // Đây là phần quan trọng nhất: định nghĩa hàm callback để ký
-                // Hàm này sẽ được PoDoFo gọi khi nó đã chuẩn bị xong dữ liệu cần ký
-                std::cout << "=== callback SigningService Calling ===" << std::endl;
+                //params.SignedHashHandler = [&](PoDoFo::bufferview signedHash, bool dryrun) {
                 params.SigningService = [&](PoDoFo::bufferview hashToSign, bool dryrun, PoDoFo::charbuff& signedHash) {
-                    // **LƯU Ý QUAN TRỌNG VỀ TÍNH HỢP LỆ CỦA CHỮ KÝ**
-                    // PoDoFo cung cấp `hashToSign` - đây là dữ liệu THẬT SỰ cần được ký để chữ ký hợp lệ.
-                    // Tuy nhiên, theo yêu cầu của bạn, chúng ta sẽ BỎ QUA `hashToSign` và sử dụng `data_to_send_to_card` (tức `pdfHashBytes` của bạn).
-                    // Điều này sẽ làm cho chữ ký cuối cùng bị báo lỗi "Invalid Signature" khi xác thực.
-                    std::cout << "=== Send Sign command to the Card ===" << std::endl;
+                    // Thêm log để biết chúng ta đang ở bước nào
+                    std::cout << "--> Entering SigningService. Is dry run: " << (dryrun ? "YES" : "NO") << std::endl;
+
+                    const size_t signatureSize = static_cast<size_t>(signatureLength);
+
+                    if (dryrun) {
+                        // Lần 1: Báo cho PoDoFo kích thước cần thiết. Thao tác resize ở đây là ĐÚNG.
+                        std::cout << "Dry run: Informing PoDoFo that signature will be " << signatureSize << " bytes." << std::endl;
+                        //signedHash.resize(signatureSize);
+                        //std::cout << "<-- Exiting SigningService (Dry run complete)." << std::endl;
+                        //return;
+                    }
+
+                    // Lần 2: Lấy chữ ký thật và điền vào bộ đệm đã được cấp phát sẵn.
+                    // 1. Lấy dữ liệu PoDoFo cung cấp và tính hash SHA-256
+
+                    std::vector<uint8_t> digest(SHA256_DIGEST_LENGTH);
+                    SHA256(reinterpret_cast<const unsigned char*>(hashToSign.data()), hashToSign.size(), digest.data());
+
+                    // 2. Tạo cấu trúc DigestInfo (định danh SHA256 + hash) để gửi cho thẻ
+                    const std::vector<uint8_t> digestInfoPrefix = {
+                            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+                            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+                    };
+                    std::vector<uint8_t> data_to_send_to_card = digestInfoPrefix;
+                    data_to_send_to_card.insert(data_to_send_to_card.end(), digest.begin(), digest.end());
+
+                    std::cout << "Real run: Getting signature from card..." << std::endl;
                     auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(data_to_send_to_card, keyIndex));
                     if (sign_resp.size() < 2 || sign_resp[sign_resp.size() - 2] != 0x90) {
                         throw std::runtime_error("Compute signature failed on card inside callback.");
                     }
-                    std::cout << "=== Card Return Successfully ===" << std::endl;
+
                     std::vector<uint8_t> signature_raw(sign_resp.begin(), sign_resp.end() - 2);
 
-                    // Cung cấp chữ ký thô lại cho PoDoFo
-                    signedHash.assign(signature_raw.begin(), signature_raw.end());
-                };
+                    std::cout << "Real run: PoDoFo provided a buffer of size " << signedHash.size() << " bytes." << std::endl;
+                    // Kiểm tra an toàn: đảm bảo bộ đệm PoDoFo cấp phát đủ lớn.
+                    if (signedHash.size() < signature_raw.size()) {
+                        //throw std::runtime_error("PoDoFo allocated a buffer that is too small for the actual signature.");
+                    }
 
+                    std::cout << "Real run: Copying " << signature_raw.size() << " signature bytes into the buffer." << std::endl;
+                    if (!signature_raw.empty()) {
+                        //signedHash.resize(signature_raw.size());
+                        //signedHash.assign(signature_raw.begin(), signature_raw.end());
+                        //signedHash = signature_raw;
+                        //memcpy(signedHash.data(), signature_raw.data(), signature_raw.size());
+                        signedHash.clear();
+                        for (uint8_t byte : signature_raw) {
+                            signedHash.push_back(static_cast<char>(byte));
+                        }
+                    }
+
+                    std::cout << "<-- Exiting SigningService (Real run complete)." << std::endl;
+                };
                 // Tạo đối tượng signer
                 PoDoFo::PdfSignerCms signer(
                         PoDoFo::bufferview(reinterpret_cast<const char*>(certificate_data.data()), certificate_data.size()),
                         params
                 );
 
+                std::cout << "=== Tạo đối tượng signer Successfully ===" << std::endl;
                 // 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn
+                std::cout << "=== 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn ===" << std::endl;
                 std::vector<char> buffer;
                 PoDoFo::VectorStreamDevice outputDevice(buffer);
                 PoDoFo::SignDocument(document, outputDevice, signer, signatureField);
+                std::cout << "=== 5. Thực hiện ký - SỬ DỤNG PoDoFo::VectorStreamDevice có sẵn END ===" << std::endl;
 
                 // 6. Lấy kết quả và trả về cho Flutter
                 std::vector<uint8_t> signed_pdf_bytes(buffer.data(), buffer.data() + buffer.size());

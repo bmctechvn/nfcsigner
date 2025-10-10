@@ -196,6 +196,7 @@ class _HomePageState extends State<HomePage> {
       pageNumber: 1,     // Trang số 1
       contact: 'info@bmctech.vn',
       signerName: 'BMC T&S JSC',
+      signDate: DateTime.now(),
       signatureImage: await _loadSignatureImage(), // Tùy chọn: load ảnh chữ ký
     );
     // 3. Gọi plugin để ký

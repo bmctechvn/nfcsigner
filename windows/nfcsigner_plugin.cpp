@@ -13,21 +13,18 @@
 #include <sstream>
 #include <iostream>
 #include <string>
-#include <podofo/auxiliary/Version.h>
 
 #ifdef HAVE_PODOFO
 // Include PoDoFo và OpenSSL
 #include <podofo/podofo.h>
-#include <podofo/main/PdfSigner.h>
-#include <podofo/main/PdfMemDocument.h>
-#include <podofo/main/PdfSignature.h>
-#include <podofo/main/PdfPage.h>
-#include <openssl/sha.h>
+//#include <podofo/private/PdfDeclarationsPrivate.h>
+//#include <openssl/sha.h>
 #include <openssl/x509.h>
 #include <openssl/cms.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/asn1.h>
+//#include <podofo/private/OpenSSLInternal.h>
 using namespace PoDoFo;
 #endif
 
@@ -354,6 +351,8 @@ void NfcsignerPlugin::HandleMethodCall(
                 std::string signerName = "BMC T&S JSC";
 
                 auto config_iter = args->find(flutter::EncodableValue("signatureConfig"));
+                std::vector<uint8_t> signatureImageBytes;
+                std::string signDate;
                 if (config_iter != args->end()) {
                     auto signatureConfig = std::get<flutter::EncodableMap>(config_iter->second);
 
@@ -364,6 +363,8 @@ void NfcsignerPlugin::HandleMethodCall(
                     auto page_iter = signatureConfig.find(flutter::EncodableValue("pageNumber"));
                     auto contact_iter = signatureConfig.find(flutter::EncodableValue("contact"));
                     auto signerName_iter = signatureConfig.find(flutter::EncodableValue("signerName"));
+                    auto signatureImage_iter = signatureConfig.find(flutter::EncodableValue("signatureImage"));
+                    auto signDate_iter = signatureConfig.find(flutter::EncodableValue("signDate"));
 
                     if (x_iter != signatureConfig.end()) x = std::get<double>(x_iter->second);
                     if (y_iter != signatureConfig.end()) y = std::get<double>(y_iter->second);
@@ -372,6 +373,8 @@ void NfcsignerPlugin::HandleMethodCall(
                     if (page_iter != signatureConfig.end()) pageNumber = std::get<int>(page_iter->second);
                     if (contact_iter != signatureConfig.end()) contact = std::get<std::string>(contact_iter->second);
                     if (signerName_iter != signatureConfig.end()) signerName = std::get<std::string>(signerName_iter->second);
+                    if (signatureImage_iter != signatureConfig.end()) signatureImageBytes = std::get<std::vector<uint8_t>>(signatureImage_iter->second);
+                    if (signDate_iter != signatureConfig.end()) signDate = std::get<std::string>(signDate_iter->second);
                 }
 
                 // 2. Giao tiếp với thẻ để lấy Certificate
@@ -407,63 +410,84 @@ void NfcsignerPlugin::HandleMethodCall(
 
                 // API mới để tạo field chữ ký
                 std::cout << "=== API for Signature ===" << std::endl;
+                Rect annot_rect = PoDoFo::Rect(x, y, width, height);
                 auto& signatureField = page.CreateField<PoDoFo::PdfSignature>(
-                        "Signature", PoDoFo::Rect(x, y, width, height)
+                        "BMC-Signature", annot_rect
                 );
                 std::cout << "=== Starting set some signature parameters===" << std::endl;
+                PdfDate  dateString = PoDoFo::PdfDate::LocalNow();
                 signatureField.SetSignatureReason(PoDoFo::PdfString(reason));
                 signatureField.SetSignatureLocation(PoDoFo::PdfString(location));
                 signatureField.SetSignerName(PoDoFo::PdfString(signerName));
-                //signatureField.SetSignatureDate(PoDoFo::PdfDate(now_time));
-                // ======================== TẠO HÌNH ẢNH HIỂN THỊ - PHIÊN BẢN SỬA LỖI ========================
+                signatureField.SetSignatureDate(dateString);
 
-                // Vì PdfSignature và PdfAnnotationWidget thực chất là cùng một đối tượng PDF,
-                // chúng ta có thể tìm widget bằng cách so sánh đối tượng gốc.
-                /*
-                PoDoFo::PdfAnnotation* pAnnotation = nullptr;
-                for (auto& annotation : page.GetAnnotations()) {
-                    if (annotation && annotation->GetObject() == signatureField.GetObject()) {
-                        pAnnotation = annotation.get();
-                        break;
-                    }
-                }
+                // API CHUẨN 1: Dùng MustGetWidget() để lấy annotation
+                //auto& widget = signatureField.MustGetWidget();
+                //PoDoFo::Rect widgetRect = widget.GetRect();
 
-                if (pAnnotation) {
-                    auto* widget = static_cast<PoDoFo::PdfAnnotationWidget*>(pAnnotation);
-                    auto& xobject = document.CreateFormXObject(widget->GetRect());
+                // API CHUẨN 2: Dùng CreateXObjectForm() để tạo canvas
+                auto sigXObject = document.CreateXObjectForm(annot_rect);
+
+                if (sigXObject) {
                     PoDoFo::PdfPainter painter;
-                    painter.SetCanvas(xobject);
+                    // API CHUẨN 3: SetCanvas hoạt động với đối tượng trả về từ CreateXObjectForm
+                    painter.SetCanvas(*sigXObject);
+                    // Tạo một đối tượng màu (ở đây là màu đen)
+                    PoDoFo::PdfColor black(0.0, 0.0, 0.0);
+                    painter.GraphicsState.SetStrokingColor(black);
+                    painter.GraphicsState.SetNonStrokingColor(black);
+                    const double sig_width = annot_rect.Width;
+                    const double sig_height = annot_rect.Height;
+                    //std::cout << "=== Signature width: " << sig_width <<" Signature height: " << sig_height << " ===" << std::endl;
+                    // Vẽ đường viền
+                    painter.DrawRectangle(0, 0, sig_width, sig_height);
 
-                    const double sig_height = widget->GetRect().GetHeight();
-                    painter.Rectangle(0, 0, widget->GetRect().GetWidth(), sig_height);
-                    painter.Stroke();
-
-                    auto* fontBold = document.GetFonts().SearchFont("Helvetica-Bold");
+                    //auto* fontBold = document.GetFonts().SearchFont("Helvetica-Bold");
                     auto* fontRegular = document.GetFonts().SearchFont("Helvetica");
 
-                    std::string line1 = signerName;
-                    std::string line2 = reason;
-
-                    if (fontBold) {
-                        painter.TextState.SetFont(*fontBold, 10);
-                        painter.DrawText(line1, 5, sig_height - 14);
-                    }
-
+                    std::string line1 = "Người ký: " + signerName;
+                    std::string line2 = "Email: " + contact;
+                    std::string line3 = "Ngày ký: " + signDate;
+                    Rect tex_rect = PoDoFo::Rect( x+ 80, y - 5, width - 80, height);
                     if (fontRegular) {
-                        painter.TextState.SetFont(*fontRegular, 8);
-                        painter.DrawText(line2, 5, sig_height - 28);
-                        painter.DrawText(line3, 5, sig_height - 40);
+                        painter.TextState.SetFont(*fontRegular, 11);
+                        painter.DrawTextMultiLine(
+                                            line1 +  "\n" +
+                                            line2 + "\n" +
+                                            line3,
+                                            tex_rect
+                                            );
                     }
 
+                    if (!signatureImageBytes.empty()) {
+                        //std::cout << "=== Đang lấy thông tin signatureImageBytes ===" << std::endl;
+                        try {
+                            auto image = document.CreateImage();
+                            image->LoadFromBuffer(
+                                    PoDoFo::bufferview(
+                                            reinterpret_cast<const char*>(signatureImageBytes.data()),
+                                            signatureImageBytes.size()
+                                    )
+                            );
+                            //std::cout << "=== signatureImageBytes Height:" << image->GetHeight() << " Width: " << image->GetWidth()  << std::endl;
+                            if (image->GetWidth() > 0 && image->GetHeight() > 0) {
+                                double img_h = 40.0; // Chiều cao mong muốn của ảnh
+                                double scale = img_h / image->GetHeight();
+                                //double img_w = image->GetWidth() * scale;
+
+                                painter.DrawImage(*image, x + 2, y + (annot_rect.Height - img_h)/2, scale, scale);
+                            }
+                        } catch(const PoDoFo::PdfError& e) {
+                            std::cerr << "Warning: Không thể load ảnh chữ ký: " << e.what() << std::endl;
+                        }
+                    }
+                    //painter.Save();
                     painter.FinishDrawing();
-                    widget->SetAppearanceStream(&xobject);
+
+                    signatureField.MustGetWidget().SetAppearanceStream(*sigXObject);
                 }
-                 */
-                // ===========================================================================================
-
-
+                // =====================================================================================================
                 std::cout << "=== Successfully set signature reason/location ===" << std::endl;
-
                 // 4. Cấu hình PdfSignerCms với callback để ký bằng thẻ
                 std::cout << "=== Cấu hình PdfSignerCms với callback để ký bằng thẻ ===" << std::endl;
                 PoDoFo::PdfSignerCmsParams params;
@@ -472,7 +496,6 @@ void NfcsignerPlugin::HandleMethodCall(
                 params.Hashing = PoDoFo::PdfHashingAlgorithm::SHA256;
                 params.Flags = PoDoFo::PdfSignerCmsFlags::ServiceDoDryRun;
 
-                //params.SignedHashHandler = [&](PoDoFo::bufferview signedHash, bool dryrun) {
                 params.SigningService = [&](PoDoFo::bufferview hashToSign, bool dryrun, PoDoFo::charbuff& signedHash) {
                     // Thêm log để biết chúng ta đang ở bước nào
                     std::cout << "--> Entering SigningService. Is dry run: " << (dryrun ? "YES" : "NO") << std::endl;

@@ -10,6 +10,7 @@ class PdfSignatureConfig {
   final Uint8List? signatureImage;
   final String? contact;
   final String? signerName;
+  final DateTime? signDate;
 
   const PdfSignatureConfig({
     this.x = 36.0,
@@ -20,6 +21,7 @@ class PdfSignatureConfig {
     this.signatureImage,
     this.contact,
     this.signerName,
+    this.signDate,
   });
 
   Map<String, dynamic> toMap() {
@@ -32,6 +34,7 @@ class PdfSignatureConfig {
       'signatureImage': signatureImage,
       'contact': contact,
       'signerName': signerName,
+      'signDate': signDate?.toIso8601String(), // Chuyển đổi DateTime thành chuỗi ISO 8601'
     };
   }
 

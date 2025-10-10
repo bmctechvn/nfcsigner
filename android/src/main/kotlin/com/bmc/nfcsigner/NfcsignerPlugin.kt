@@ -416,7 +416,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       val certificate = parseCertificateSimple(certificateBytes)
       //certFactory.generateCertificate(ByteArrayInputStream(certificateBytes))
       if (certificate != null) {
-        println("DEBUG: Certificate parsed successfully!")
+        //println("DEBUG: Certificate parsed successfully!")
         println("DEBUG: Subject: ${certificate.subjectDN}")
         println("DEBUG: Issuer: ${certificate.issuerDN}")
         //return certificate

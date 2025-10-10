@@ -195,7 +195,7 @@ class _HomePageState extends State<HomePage> {
       height: 80.0,      // Chiều cao
       pageNumber: 1,     // Trang số 1
       contact: 'info@bmctech.vn',
-      signerName: 'BMC T&S JSC',
+      signerName: 'Màu Văn Phương',
       signDate: DateTime.now(),
       signatureImage: await _loadSignatureImage(), // Tùy chọn: load ảnh chữ ký
     );

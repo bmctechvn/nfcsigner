@@ -431,7 +431,8 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       val signedPdfStream = ByteArrayOutputStream()
 
       // Sử dụng StampingProperties cho iText 7
-      val stampingProperties = StampingProperties().useAppendMode()
+      val stampingProperties = StampingProperties()
+      //.useAppendMode()
       val signer = PdfSigner(reader, signedPdfStream, stampingProperties)
 
       val pageRect = com.itextpdf.kernel.geom.Rectangle(x, y, width, height)

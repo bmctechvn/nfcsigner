@@ -1,6 +1,6 @@
 name: nfcsigner
 description: "Plugin cho thẻ BCard cho Android và iOS."
-version: 0.0.2
+version: 1.0.2
 homepage: "https://github.com/bmctechvn/nfcsigner"
 repository: "https://github.com/bmctechvn/nfcsigner"
 
@@ -13,7 +13,6 @@ dependencies:
     sdk: flutter
   flutter_web_plugins:
     sdk: flutter
-  web: ^1.0.0
   plugin_platform_interface: ^2.0.2
   crypto: ^3.0.6
   pdf: ^3.10.0

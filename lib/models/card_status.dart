@@ -61,8 +61,7 @@ extension CardStatusExtension on CardStatus {
       case CardStatus.nfcUnavailable:
         return 'NFC không có sẵn';
       case CardStatus.unknownError:
-      default:
         return 'Lỗi không xác định';
-    }
+      }
   }
 }

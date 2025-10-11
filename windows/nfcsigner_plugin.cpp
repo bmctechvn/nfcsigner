@@ -331,7 +331,7 @@ void NfcsignerPlugin::HandleMethodCall(
                 if (!args) {
                     throw std::runtime_error("Arguments are null");
                 }
-
+                std::cout << "=== Starting get Parameters ===" << std::endl;
                 auto pdfBytes = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("pdfBytes")));
                 auto appletID = std::get<std::string>(args->at(flutter::EncodableValue("appletID")));
                 auto pin = std::get<std::string>(args->at(flutter::EncodableValue("pin")));
@@ -421,11 +421,6 @@ void NfcsignerPlugin::HandleMethodCall(
                 signatureField.SetSignerName(PoDoFo::PdfString(signerName));
                 signatureField.SetSignatureDate(dateString);
 
-                // API CHUẨN 1: Dùng MustGetWidget() để lấy annotation
-                //auto& widget = signatureField.MustGetWidget();
-                //PoDoFo::Rect widgetRect = widget.GetRect();
-
-                // API CHUẨN 2: Dùng CreateXObjectForm() để tạo canvas
                 auto sigXObject = document.CreateXObjectForm(annot_rect);
 
                 if (sigXObject) {

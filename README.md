@@ -23,7 +23,7 @@ Thêm dependency này vào file `pubspec.yaml` của dự án Flutter của bạ
 
 ```yaml
 dependencies:
-  nfcsigner: ^0.0.1 # Thay bằng phiên bản mới nhất trên pub.dev
+  nfcsigner: ^1.0.2
 ```
 Hoặc get package qua github:
 ```yaml

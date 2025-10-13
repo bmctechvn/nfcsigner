@@ -1,3 +1,5 @@
+## 1.0.3
+* Add Signature Image Size Settings
 ## 1.0.2
 
 * Add PDF Signing Features

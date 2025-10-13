@@ -11,9 +11,78 @@ project(${PROJECT_NAME} LANGUAGES CXX)
 # not be changed.
 set(PLUGIN_NAME "nfcsigner_plugin")
 
+# Find required packages for Linux
+find_package(PkgConfig REQUIRED)
+
+# Find PC/SC Lite
+pkg_check_modules(PCSC REQUIRED libpcsclite)
+if(PCSC_FOUND)
+    message(STATUS "Found PC/SC Lite: ${PCSC_INCLUDE_DIRS}")
+    add_compile_definitions(HAVE_PCSC=1)
+endif()
+
+# Find OpenSSL
+find_package(OpenSSL REQUIRED)
+if(OPENSSL_FOUND)
+    message(STATUS "Found OpenSSL: ${OPENSSL_INCLUDE_DIR}")
+endif()
+
+# Find PoDoFo
+# Cách 1: Tìm qua pkg-config
+pkg_check_modules(PODOFO_PKGCONFIG QUIET libpodofo)
+if(PODOFO_PKGCONFIG_FOUND)
+    message(STATUS "Found PoDoFo via pkg-config: ${PODOFO_PKGCONFIG_VERSION}")
+    set(PODOFO_INCLUDE_DIRS ${PODOFO_PKGCONFIG_INCLUDE_DIRS})
+    set(PODOFO_LIBRARIES ${PODOFO_PKGCONFIG_LIBRARIES})
+    set(HAVE_PODOFO 1)
+else()
+    # Cách 2: Tìm thủ công các vị trí phổ biến trên Ubuntu
+    find_path(PODOFO_INCLUDE_DIR
+            NAMES podofo/podofo.h
+            PATHS /usr/include
+            /usr/local/include
+            /usr/include/podofo
+            NO_DEFAULT_PATH
+    )
+
+    find_library(PODOFO_LIBRARY
+            NAMES podofo libpodofo
+            PATHS /usr/lib/x86_64-linux-gnu
+            /usr/lib
+            /usr/local/lib
+            NO_DEFAULT_PATH
+    )
+
+    if(PODOFO_INCLUDE_DIR AND PODOFO_LIBRARY)
+        message(STATUS "Found PoDoFo manually:")
+        message(STATUS "  Include: ${PODOFO_INCLUDE_DIR}")
+        message(STATUS "  Library: ${PODOFO_LIBRARY}")
+        set(PODOFO_INCLUDE_DIRS ${PODOFO_INCLUDE_DIR})
+        set(PODOFO_LIBRARIES ${PODOFO_LIBRARY})
+        set(HAVE_PODOFO 1)
+    else()
+        message(WARNING "PoDoFo not found - PDF signing will be disabled")
+    endif()
+endif()
+if(PODOFO_FOUND)
+    message(STATUS "Found PoDoFo: ${PODOFO_INCLUDE_DIRS}")
+    add_compile_definitions(HAVE_PODOFO=1)
+
+    # Additional PoDoFo dependencies that might be needed
+    find_package(Fontconfig)
+    find_package(FREETYPE)
+    find_package(JPEG)
+    find_package(PNG)
+    find_package(TIFF)
+else()
+    message(WARNING "PoDoFo not found - PDF signing will be disabled")
+    add_compile_definitions(HAVE_PODOFO=0)
+endif()
+
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
-  "nfcsigner_plugin.cc"
+        "nfcsigner_plugin.cc"
+        "nfcsigner_plugin_register.cpp"
 )
 
 # Define the plugin library target. Its name must not be changed (see comment
@@ -37,8 +106,18 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 # Source include directories and library dependencies. Add any plugin-specific
 # dependencies here.
 target_include_directories(${PLUGIN_NAME} INTERFACE
-  "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        ${PCSC_INCLUDE_DIRS}
+        ${PODOFO_INCLUDE_DIRS}
+        ${OPENSSL_INCLUDE_DIR}
+)
+target_link_libraries(${PLUGIN_NAME} PRIVATE
+        flutter
+        ${PCSC_LIBRARIES}
+        ${PODOFO_LIBRARIES}
+        OpenSSL::SSL
+        OpenSSL::Crypto
+)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 
 # List of absolute paths to libraries that should be bundled with the plugin.

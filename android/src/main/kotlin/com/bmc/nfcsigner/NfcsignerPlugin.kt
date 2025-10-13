@@ -30,6 +30,28 @@ import org.bouncycastle.cert.X509CertificateHolder
 import java.security.cert.X509Certificate
 import com.itextpdf.io.image.ImageDataFactory
 
+//import org.simalliance.openmobileapi.Channel;
+//import org.simalliance.openmobileapi.Reader;
+//import org.simalliance.openmobileapi.SEService;
+//import org.simalliance.openmobileapi.SEService.CallBack;
+//import org.simalliance.openmobileapi.Session;
+
+import fr.coppernic.sdk.pcsc2.ApduResponse;
+import fr.coppernic.sdk.pcsc2.SCard;
+import fr.coppernic.sdk.utils.core.CpcBytes;
+import fr.coppernic.sdk.utils.core.CpcResult;
+import fr.coppernic.sdk.utils.core.CpcResult.RESULT;
+import fr.coppernic.sdk.power.PowerManager;
+import fr.coppernic.sdk.power.api.PowerListener;
+import fr.coppernic.sdk.power.api.peripheral.Peripheral;
+import fr.coppernic.sdk.utils.ui.TextAppender;
+
+// Cho Kotlin Coroutines
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import io.reactivex.Single // Import Single từ RxJava
 
 class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdapter.ReaderCallback {
   private lateinit var channel: MethodChannel
@@ -37,6 +59,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   private var currentActivity: Activity? = null
   private var pendingCall: MethodCall? = null
   private var pendingResult: Result? = null
+  private fun ByteArray.toHexString(): String = joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
   companion object {
     init {
       // Đảm bảo Bouncy Castle Provider được đăng ký một lần duy nhất
@@ -51,8 +74,18 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     channel.setMethodCallHandler(this)
     nfcAdapter = NfcAdapter.getDefaultAdapter(flutterPluginBinding.applicationContext)
   }
-
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
+    // Tạm thời gọi debug
+    debugUsbConnection()
+    // Logic tự động chuyển đổi: Ưu tiên USB trước
+    if (isUsbReaderConnected()) {
+      println("DEBUG: USB reader detected. Handling via USB.")
+      handleUsbRequest(call, result)
+    } else {
+      println("DEBUG: No USB reader found. Falling back to NFC.")
+      handleNfcRequest(call, result)
+    }
+    /*
     if (nfcAdapter == null) {
       result.error("NFC_UNAVAILABLE", "Thiết bị không hỗ trợ NFC.", null)
       return
@@ -68,9 +101,199 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       this,
       NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
       null
-    )
+    )*/
+  }
+  /**
+   * Hàm kiểm tra kết nối USB, được viết lại để xử lý null safety.
+   */
+  private fun isUsbReaderConnected(): Boolean {
+    return try {
+      // Thử dùng Android OMAPI trước
+      if (isOmapiAvailable()) {
+        println("--- DEBUG: Using Android OMAPI ---")
+        checkReadersViaOmapi()
+      } else {
+        println("--- DEBUG: OMAPI not available, trying Coppernic ---")
+        checkReadersViaCoppernic()
+      }
+    } catch (e: Exception) {
+      println("--- DEBUG: All USB reader checks failed: ${e.message} ---")
+      false
+    }
   }
 
+  private fun isOmapiAvailable(): Boolean {
+    return try {
+      // Kiểm tra xem OMAPI có sẵn không
+      Class.forName("android.se.omapi.Reader")
+      true
+    } catch (e: ClassNotFoundException) {
+      false
+    }
+  }
+
+  private fun checkReadersViaOmapi(): Boolean {
+    // Chỉ chạy trên Android 8.0+ (API level 26+)
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) {
+      println("--- DEBUG: OMAPI requires Android 8.0+ ---")
+      return false
+    }
+
+    return try {
+      val context = currentActivity?.applicationContext ?: return false
+
+      // SỬA: Dùng tên service "se" thay vì Context.SESERVICE
+      val seService = context.getSystemService("se") as? android.se.omapi.SEService
+      if (seService == null) {
+        println("--- DEBUG: SEService not available ---")
+        return false
+      }
+
+      // SEService cần được kết nối trước khi sử dụng
+      // Đây là một quá trình bất đồng bộ, cần implement SEService.OnConnectedListener
+      // Vì đây chỉ là kiểm tra nhanh, chúng ta sẽ bỏ qua
+
+      val readers = seService.readers
+      println("--- DEBUG: OMAPI Readers found: ${readers.size} ---")
+      readers.forEach { reader ->
+        println("--- DEBUG: OMAPI Reader: ${reader.name} ---")
+      }
+
+      readers.isNotEmpty()
+    } catch (e: Exception) {
+      println("--- DEBUG: OMAPI check failed: ${e.message} ---")
+      false
+    }
+  }
+
+  private fun checkReadersViaCoppernic(): Boolean {
+    val context = currentActivity?.applicationContext ?: return false
+    var sCard: SCard? = null
+    return try {
+      sCard = SCard.Companion.createSCard(context).blockingGet()
+
+      if (sCard.establishContext() != RESULT.OK) return false
+
+      val readers = ArrayList<String>()
+      sCard.listReaders(readers)
+      readers.isNotEmpty()
+    } catch (e: Exception) {
+      when {
+        e.message?.contains("SERVICE_NOT_FOUND") == true -> {
+          println("--- INFO: Coppernic service not available on this device ---")
+        }
+        else -> {
+          println("--- DEBUG: Coppernic error: ${e.message} ---")
+        }
+      }
+      false
+    } finally {
+      sCard?.close()
+    }
+  }
+  /**
+   * Hàm xử lý cho luồng NFC (gần như không đổi).
+   */
+  private fun handleNfcRequest(call: MethodCall, result: Result) {
+    if (nfcAdapter == null) {
+      result.error("NFC_UNAVAILABLE", "Thiết bị không hỗ trợ NFC.", null)
+      cleanup()
+      return
+    }
+    if (currentActivity == null) {
+      result.error("NO_ACTIVITY", "Plugin không thể truy cập Activity.", null)
+      cleanup()
+      return
+    }
+    this.pendingCall = call
+    this.pendingResult = result
+    nfcAdapter?.enableReaderMode(
+      currentActivity, this,
+      NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+      null
+    )
+  }
+  /**
+   * Hàm xử lý cho luồng USB, đã sửa lỗi null safety.
+   */
+  private fun handleUsbRequest(call: MethodCall, result: Result) {
+    val context = currentActivity?.applicationContext
+    if (context == null) {
+      result.error("NO_CONTEXT", "Không thể lấy context.", null)
+      cleanup()
+      return
+    }
+
+    CoroutineScope(Dispatchers.IO).launch {
+      var sCard: SCard? = null
+      try {
+        sCard = SCard.createSCard(context).blockingGet()
+        sCard!! // Khẳng định không null
+
+        if (sCard.establishContext() != RESULT.OK) throw IOException("Không thể thiết lập PCSC context.")
+        val readers = ArrayList<String>()
+        if (sCard.listReaders(readers) != RESULT.OK || readers.isEmpty()) throw IOException("Không tìm thấy đầu đọc thẻ USB.")
+        val readerName = readers[0]
+        if (sCard.connect(readerName) != RESULT.OK) throw IOException("Không thể kết nối đến đầu đọc '$readerName'.")
+
+        // Tạo "hàm giao vận" (transceiver) cho USB, ĐÃ BAO GỒM logic GET RESPONSE
+        val usbTransceiver: (ByteArray) -> ByteArray = { apdu ->
+          val apduResponse = ApduResponse()
+          var res = sCard.transmit(apdu, apduResponse)
+          if (res != RESULT.OK) throw IOException("Lỗi transmit APDU. Mã lỗi: $res")
+
+          // ======================== THÊM CÁC DÒNG DEBUG TẠI ĐÂY ========================
+          println("--- DEBUG: Bắt đầu phân tích ApduResponse ---")
+
+          // In toàn bộ đối tượng (thường sẽ gọi hàm toString() của nó)
+          println("1. Toàn bộ đối tượng: $apduResponse")
+
+          // In dữ liệu (payload) dưới dạng Hex
+          val dataBytes = apduResponse.data
+          if (dataBytes != null) {
+            println("2. Dữ liệu (data): ${dataBytes.toHexString()}")
+          } else {
+            println("2. Dữ liệu (data): null")
+          }
+          var sw1 = 0x61 //apduResponse.sW1
+          var sw2 = 0x00 //apduResponse.sW2
+
+          if (sw1 == 0x61) {
+            val fullResponseData = ByteArrayOutputStream()
+            if (apduResponse.data != null) fullResponseData.write(apduResponse.data)
+
+            while (sw1 == 0x61) {
+              val getResponseCmd = byteArrayOf(0x00, 0xC0.toByte(), 0x00, 0x00, sw2.toByte())
+              res = sCard.transmit(getResponseCmd, apduResponse)
+              if (res != RESULT.OK) throw IOException("Lỗi GET RESPONSE. Mã lỗi: $res")
+
+              sw1 = 0x90 //apduResponse.sW1
+              sw2 = 0x00 //apduResponse.sW2
+              if (apduResponse.data != null) fullResponseData.write(apduResponse.data)
+            }
+            fullResponseData.toByteArray() + byteArrayOf(sw1.toByte(), sw2.toByte())
+          } else {
+            (apduResponse.data ?: byteArrayOf()) + byteArrayOf(sw1.toByte(), sw2.toByte())
+          }
+        }
+
+        withContext(Dispatchers.Main) {
+          executeCommand(usbTransceiver, call, result)
+        }
+
+      } catch (e: Exception) {
+        withContext(Dispatchers.Main) {
+          result.error("USB_ERROR", "Lỗi giao tiếp USB: ${e.message}", null)
+        }
+      } finally {
+        sCard?.disconnect()
+        sCard?.close()
+        withContext(Dispatchers.Main) {
+          cleanup()
+        }
+      }
+    }
+  }
   override fun onTagDiscovered(tag: Tag?) {
     val isoDep = IsoDep.get(tag)
     if (isoDep == null) {
@@ -87,13 +310,14 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     try {
       isoDep.connect()
       isoDep.timeout = 5000
-      when (call.method) {
-        "generateSignature" -> handleGenerateSignature(isoDep, call, result)
-        "getRsaPublicKey" -> handleGetRsaPublicKey(isoDep, call, result)
-        "getCertificate" -> handleGetCertificate(isoDep, call, result)
-        "signPdf" -> handleSignPdf(isoDep, call, result)
-        else -> result.notImplemented()
+      val nfcTransceiver: (ByteArray) -> ByteArray = { apdu ->
+        println("DEBUG: NFC -> ${apdu.toHexString()}")
+        val response = transceiveAndGetResponse(isoDep, apdu) // Dùng hàm helper cũ
+        println("DEBUG: NFC <- ${response.toHexString()}")
+        response
       }
+      // Gọi hàm thực thi chung
+      executeCommand(nfcTransceiver, call, result)
     } catch (e: Exception) {
       result.error("COMMUNICATION_ERROR", "Lỗi giao tiếp với thẻ: ${e.message}", null)
     } finally {
@@ -103,8 +327,20 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       cleanup()
     }
   }
+  /**
+   * Hàm thực thi chung, nhận vào một hàm giao vận và xử lý logic.
+   */
+  private fun executeCommand(transceiver: (ByteArray) -> ByteArray, call: MethodCall, result: Result) {
+    when (call.method) {
+      "generateSignature" -> handleGenerateSignature(transceiver, call, result)
+      "getRsaPublicKey" -> handleGetRsaPublicKey(transceiver, call, result)
+      "getCertificate" -> handleGetCertificate(transceiver, call, result)
+      "signPdf" -> handleSignPdf(transceiver, call, result)
+      else -> result.notImplemented()
+    }
+  }
 
-  private fun handleGenerateSignature(isoDep: IsoDep, call: MethodCall, result: Result) {
+  private fun handleGenerateSignature(transceiver: (ByteArray) -> ByteArray, call: MethodCall, result: Result) {
     try {
       val appletID = call.argument<String>("appletID")!!
       val pin = call.argument<String>("pin")!!
@@ -112,14 +348,14 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       val keyIndex = call.argument<Int>("keyIndex")!!
 
       // --- Select Applet ---
-      val selectResponse = isoDep.transceive(createSelectAppletCommand(hexStringToByteArray(appletID)))
+      val selectResponse = transceiver(createSelectAppletCommand(hexStringToByteArray(appletID)))
       if (!isSuccess(selectResponse)) {
         result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", getStatusDetails(selectResponse))
         return
       }
 
       // --- Verify PIN ---
-      val verifyResponse = isoDep.transceive(createVerifyPinCommand(pin))
+      val verifyResponse = transceiver(createVerifyPinCommand(pin))
       if (!isSuccess(verifyResponse)) {
         val (sw1, sw2) = getStatusWords(verifyResponse)
         val triesLeft = if (sw1 == 0x63 && sw2 >= 0xC0) sw2 - 0xC0 else 0
@@ -132,7 +368,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       val signatureApdu = createComputeSignatureCommand(dataToSign, keyIndex)
 
       // 1. Gửi lệnh ký ban đầu
-      var response = isoDep.transceive(signatureApdu)
+      var response = transceiver(signatureApdu)
       var (sw1, sw2) = getStatusWords(response)
 
       val signatureDataStream = ByteArrayOutputStream()
@@ -145,7 +381,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       // 3. Bắt đầu vòng lặp GET RESPONSE nếu thẻ yêu cầu (sw1 = 0x61)
       while (sw1 == 0x61) {
         val getResponseCommand = byteArrayOf(0x00, 0xC0.toByte(), 0x00, 0x00, sw2.toByte())
-        response = isoDep.transceive(getResponseCommand)
+        response = transceiver(getResponseCommand)
 
         val (newSw1, newSw2) = getStatusWords(response)
         sw1 = newSw1
@@ -170,13 +406,13 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       result.error("COMMUNICATION_ERROR", "Lỗi giao tiếp I/O: ${e.message}", null)
     }
   }
-  private fun handleGetRsaPublicKey(isoDep: IsoDep, call: MethodCall, result: Result) {
+  private fun handleGetRsaPublicKey(transceiver: (ByteArray) -> ByteArray, call: MethodCall, result: Result) {
     try {
       val appletID = call.argument<String>("appletID")!!
       val keyRole = call.argument<String>("keyRole")!!
 
       // Bước 1: Chọn Applet
-      val selectResponse = transceiveAndGetResponse(isoDep, createSelectAppletCommand(hexStringToByteArray(appletID)))
+      val selectResponse = transceiver(createSelectAppletCommand(hexStringToByteArray(appletID)))
       if (!isSuccess(selectResponse)) {
         result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", getStatusDetails(selectResponse))
         return
@@ -184,7 +420,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
       // Bước 2: Gửi lệnh lấy khóa công khai
       val getPubKeyApdu = createGetRsaPublicKeyCommand(keyRole)
-      val pubKeyResponse = transceiveAndGetResponse(isoDep, getPubKeyApdu)
+      val pubKeyResponse = transceiver(getPubKeyApdu)
 
       if (!isSuccess(pubKeyResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể lấy khóa công khai.", getStatusDetails(pubKeyResponse))
@@ -199,18 +435,18 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       result.error("COMMUNICATION_ERROR", "Lỗi giao tiếp I/O: ${e.message}", null)
     }
   }
-  private fun handleGetCertificate(isoDep: IsoDep, call: MethodCall, result: Result) {
+  private fun handleGetCertificate(transceiver: (ByteArray) -> ByteArray, call: MethodCall, result: Result) {
     try {
       val appletID = call.argument<String>("appletID")!!
       val keyRole = call.argument<String>("keyRole")!!
       // Bước 1: Chọn Applet
-      val selectResponse = transceiveAndGetResponse(isoDep, createSelectAppletCommand(hexStringToByteArray(appletID)))
+      val selectResponse = transceiver(createSelectAppletCommand(hexStringToByteArray(appletID)))
       if (!isSuccess(selectResponse)) {
         result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", getStatusDetails(selectResponse))
         return
       }
       // BƯỚC 2: CHỌN DỮ LIỆU CERTIFICATE (Select Data)
-      val selectCertResponse = transceiveAndGetResponse(isoDep, createSelectCertificateCommand(keyRole))
+      val selectCertResponse = transceiver(createSelectCertificateCommand(keyRole))
       if (!isSuccess(selectCertResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể chọn dữ liệu Certificate trên thẻ.", getStatusDetails(selectCertResponse))
         return
@@ -218,7 +454,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       // Bước 3: Gửi lệnh lấy certificate
       val getCertApdu = createGetCertificateCommand()
       // Dùng transceiveAndGetResponse vì certificate có thể rất lớn
-      val certResponse = transceiveAndGetResponse(isoDep, getCertApdu)
+      val certResponse = transceiver(getCertApdu)
 
       if (!isSuccess(certResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể lấy certificate.", getStatusDetails(certResponse))
@@ -347,6 +583,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     // Nếu không phải 61xx, trả về phản hồi gốc
     return response
   }
+
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) { channel.setMethodCallHandler(null) }
   override fun onAttachedToActivity(binding: ActivityPluginBinding) { currentActivity = binding.activity }
   override fun onDetachedFromActivity() { currentActivity = null }
@@ -354,7 +591,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   override fun onDetachedFromActivityForConfigChanges() { onDetachedFromActivity() }
 
   // --- HÀM XỬ LÝ KÝ PDF ĐÃ CẬP NHẬT CHO ITEXT 7 ---
-  private fun handleSignPdf(isoDep: IsoDep, call: MethodCall, result: Result) {
+  private fun handleSignPdf(transceiver: (ByteArray) -> ByteArray, call: MethodCall, result: Result) {
     val pdfBytes = call.argument<ByteArray>("pdfBytes")!!
     val appletID = call.argument<String>("appletID")!!
     val pin = call.argument<String>("pin")!!
@@ -377,13 +614,13 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     try {
       Security.addProvider(BouncyCastleProvider())
       // --- Bước 1: Chọn Applet và Xác thực PIN ---
-      val selectResponse = transceiveAndGetResponse(isoDep, createSelectAppletCommand(hexStringToByteArray(appletID)))
+      val selectResponse = transceiver(createSelectAppletCommand(hexStringToByteArray(appletID)))
       if (!isSuccess(selectResponse)) {
         result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", getStatusDetails(selectResponse))
         return
       }
       println("DEBUG: Verifying PIN before signing...")
-      val verifyResponse = transceiveAndGetResponse(isoDep, createVerifyPinCommand(pin))
+      val verifyResponse = transceiver(createVerifyPinCommand(pin))
       if (!isSuccess(verifyResponse)) {
         result.error("AUTH_ERROR", "Xác thực PIN thất bại.", getStatusDetails(verifyResponse))
         return
@@ -392,14 +629,14 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
       // --- Bước 2: Lấy Certificate từ thẻ ---
       val keyRole = "sig" // Mặc định lấy certificate cho khóa ký
-      val selectCertResponse = transceiveAndGetResponse(isoDep, createSelectCertificateCommand(keyRole))
+      val selectCertResponse = transceiver(createSelectCertificateCommand(keyRole))
       if (!isSuccess(selectCertResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể chọn dữ liệu Certificate trên thẻ.", getStatusDetails(selectCertResponse))
         return
       }
 
       // Bước lấy certificate
-      val certResponse = transceiveAndGetResponse(isoDep, createGetCertificateCommand())
+      val certResponse = transceiver(createGetCertificateCommand())
       if (!isSuccess(certResponse)) {
         result.error("OPERATION_NOT_SUPPORTED", "Không thể lấy certificate.", getStatusDetails(certResponse))
         return
@@ -482,7 +719,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
           //println("DEBUG: DigestInfo created, length: ${hash.size}")
 
           // Ký dữ liệu trên thẻ
-          val signResponse = transceiveAndGetResponse(isoDep, createComputeSignatureCommand(hash, keyIndex))
+          val signResponse = transceiver(createComputeSignatureCommand(hash, keyIndex))
           if (!isSuccess(signResponse)) {
             val (sw1, sw2) = getStatusWords(signResponse)
             throw GeneralSecurityException("Ký trên thẻ thất bại. Mã SW: ${sw1.toString(16)}${sw2.toString(16)}")
@@ -579,5 +816,42 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     println("DEBUG: DigestInfo prefix length: ${sha256DigestInfoPrefix.size}")
 
     return sha256DigestInfoPrefix + hash
+  }
+  private fun debugUsbConnection() {
+    val context = currentActivity?.applicationContext ?: return
+    CoroutineScope(Dispatchers.IO).launch {
+      var sCard: SCard? = null
+      try {
+        println("=== DEBUG USB CONNECTION ===")
+        sCard = SCard.Companion.createSCard(context).blockingGet()
+        println("1. SCard created: ${sCard != null}")
+
+        val ctxResult = sCard.establishContext()
+        println("2. establishContext: $ctxResult")
+
+        val readers = ArrayList<String>()
+        val listResult = sCard.listReaders(readers)
+        println("3. listReaders: $listResult")
+        println("4. Readers found: ${readers.size}")
+        readers.forEachIndexed { i, reader -> println("   Reader $i: $reader") }
+
+        if (readers.isNotEmpty()) {
+          val connectResult = sCard.connect(readers[0])
+          println("5. connect to ${readers[0]}: $connectResult")
+
+          if (connectResult == RESULT.OK) {
+            val atr = sCard.getAtr()
+            println("6. ATR: ${atr?.toHexString()}")
+            sCard.disconnect()
+          }
+        }
+        println("=== END DEBUG ===")
+      } catch (e: Exception) {
+        println("=== DEBUG USB CONNECTION FAILED: ${e.message} ===")
+        //e.printStackTrace()
+      } finally {
+        sCard?.close()
+      }
+    }
   }
 }

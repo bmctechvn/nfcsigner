@@ -5,10 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:nfcsigner/nfcsigner.dart';
 import 'package:open_filex/open_filex.dart';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -198,6 +196,8 @@ class _HomePageState extends State<HomePage> {
       signerName: 'Màu Văn Phương',
       signDate: DateTime.now(),
       signatureImage: await _loadSignatureImage(), // Tùy chọn: load ảnh chữ ký
+      signatureImageHeight: 50,
+      signatureImageWidth: 50,
     );
     // 3. Gọi plugin để ký
     final signResult = await Nfcsigner.signPdf(

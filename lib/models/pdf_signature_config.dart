@@ -8,6 +8,8 @@ class PdfSignatureConfig {
   final double height;
   final int pageNumber;
   final Uint8List? signatureImage;
+  final double signatureImageWidth;
+  final double signatureImageHeight;
   final String? contact;
   final String? signerName;
   final DateTime? signDate;
@@ -19,6 +21,8 @@ class PdfSignatureConfig {
     this.height = 50.0,
     this.pageNumber = 1,
     this.signatureImage,
+    this.signatureImageWidth = 50.0,
+    this.signatureImageHeight = 50.0,
     this.contact,
     this.signerName,
     this.signDate,
@@ -32,6 +36,8 @@ class PdfSignatureConfig {
       'height': height,
       'pageNumber': pageNumber,
       'signatureImage': signatureImage,
+      'signatureImageWidth': signatureImageWidth,
+      'signatureImageHeight': signatureImageHeight,
       'contact': contact,
       'signerName': signerName,
       'signDate': signDate?.toIso8601String(), // Chuyển đổi DateTime thành chuỗi ISO 8601'
@@ -46,6 +52,8 @@ class PdfSignatureConfig {
       height: map['height']?.toDouble() ?? 50.0,
       pageNumber: map['pageNumber'] ?? 1,
       signatureImage: map['signatureImage'],
+      signatureImageWidth: map['signatureImageWidth']?.toDouble() ?? 50.0,
+      signatureImageHeight: map['signatureImageHeight']?.toDouble() ?? 50.0,
       contact: map['contact'],
       signerName: map['signerName'],
     );

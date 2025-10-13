@@ -54,6 +54,15 @@ android {
         implementation 'com.itextpdf:kernel:7.2.5'
         implementation 'com.itextpdf:sign:7.2.5'
         implementation 'org.bouncycastle:bcprov-jdk15on:1.70'
+
+        //implementation 'org.simalliance.openmobileapi:openmobileapi:1.2.0'
+        // Coppernic
+        implementation "fr.coppernic.sdk.core:CpcCore:3.4.3"
+        implementation "fr.coppernic.lib.splash:splash:0.4.1"
+        implementation "fr.coppernic.sdk.pcsc2:CpcCore:3.4.3"
+        // Thư viện cần thiết cho RxJava mà Coppernic SDK yêu cầu
+        implementation 'io.reactivex.rxjava2:rxjava:2.2.19'
+        implementation 'io.reactivex.rxjava2:rxandroid:2.1.1'
     }
 
     testOptions {

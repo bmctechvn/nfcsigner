@@ -352,6 +352,7 @@ void NfcsignerPlugin::HandleMethodCall(
 
                 auto config_iter = args->find(flutter::EncodableValue("signatureConfig"));
                 std::vector<uint8_t> signatureImageBytes;
+                double signatureImageWidth = 50.0, signatureImageHeight = 50.0;
                 std::string signDate;
                 if (config_iter != args->end()) {
                     auto signatureConfig = std::get<flutter::EncodableMap>(config_iter->second);
@@ -364,6 +365,8 @@ void NfcsignerPlugin::HandleMethodCall(
                     auto contact_iter = signatureConfig.find(flutter::EncodableValue("contact"));
                     auto signerName_iter = signatureConfig.find(flutter::EncodableValue("signerName"));
                     auto signatureImage_iter = signatureConfig.find(flutter::EncodableValue("signatureImage"));
+                    auto signatureImageWidth_iter = signatureConfig.find(flutter::EncodableValue("signatureImageWidth"));
+                    auto signatureImageHeight_iter = signatureConfig.find(flutter::EncodableValue("signatureImageHeight"));
                     auto signDate_iter = signatureConfig.find(flutter::EncodableValue("signDate"));
 
                     if (x_iter != signatureConfig.end()) x = std::get<double>(x_iter->second);
@@ -374,6 +377,8 @@ void NfcsignerPlugin::HandleMethodCall(
                     if (contact_iter != signatureConfig.end()) contact = std::get<std::string>(contact_iter->second);
                     if (signerName_iter != signatureConfig.end()) signerName = std::get<std::string>(signerName_iter->second);
                     if (signatureImage_iter != signatureConfig.end()) signatureImageBytes = std::get<std::vector<uint8_t>>(signatureImage_iter->second);
+                    if(signatureImageWidth_iter != signatureConfig.end()) signatureImageWidth = std::get<double>(signatureImageWidth_iter->second);
+                    if(signatureImageHeight_iter != signatureConfig.end()) signatureImageHeight = std::get<double>(signatureImageHeight_iter->second);
                     if (signDate_iter != signatureConfig.end()) signDate = std::get<std::string>(signDate_iter->second);
                 }
 
@@ -466,11 +471,12 @@ void NfcsignerPlugin::HandleMethodCall(
                             );
                             //std::cout << "=== signatureImageBytes Height:" << image->GetHeight() << " Width: " << image->GetWidth()  << std::endl;
                             if (image->GetWidth() > 0 && image->GetHeight() > 0) {
-                                double img_h = 40.0; // Chiều cao mong muốn của ảnh
-                                double scale = img_h / image->GetHeight();
-                                //double img_w = image->GetWidth() * scale;
+                                double img_h = signatureImageHeight; // Chiều cao mong muốn của ảnh
+                                double img_w = signatureImageWidth; // Chiều rộng mong muốn của ảnh
+                                double scale_y = img_h / image->GetHeight();
+                                double scale_x = img_w / image->GetWidth();
 
-                                painter.DrawImage(*image, x + 2, y + (annot_rect.Height - img_h)/2, scale, scale);
+                                painter.DrawImage(*image, x + 2, y + (annot_rect.Height - img_h)/2, scale_x, scale_y);
                             }
                         } catch(const PoDoFo::PdfError& e) {
                             std::cerr << "Warning: Không thể load ảnh chữ ký: " << e.what() << std::endl;

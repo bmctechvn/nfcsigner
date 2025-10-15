@@ -1,5 +1,6 @@
 package com.bmc.nfcsigner
 
+import android.content.Context
 import android.app.Activity
 import android.nfc.NfcAdapter
 import android.nfc.Tag
@@ -59,6 +60,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   private var currentActivity: Activity? = null
   private var pendingCall: MethodCall? = null
   private var pendingResult: Result? = null
+  private lateinit var applicationContext: Context
   private fun ByteArray.toHexString(): String = joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
   companion object {
     init {
@@ -73,10 +75,11 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "nfcsigner")
     channel.setMethodCallHandler(this)
     nfcAdapter = NfcAdapter.getDefaultAdapter(flutterPluginBinding.applicationContext)
+    applicationContext = flutterPluginBinding.applicationContext
   }
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
     // Tạm thời gọi debug
-    debugUsbConnection()
+    //debugUsbConnection()
     // Logic tự động chuyển đổi: Ưu tiên USB trước
     if (isUsbReaderConnected()) {
       println("DEBUG: USB reader detected. Handling via USB.")
@@ -606,11 +609,33 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     val y = (signatureConfig?.get("y") as? Double)?.toFloat() ?: 700f
     val width = (signatureConfig?.get("width") as? Double)?.toFloat() ?: 200f
     val height = (signatureConfig?.get("height") as? Double)?.toFloat() ?: 50f
+    val signatureImageWidth = (signatureConfig?.get("signatureImageWidth") as? Double)?.toFloat() ?: 50f
+    val signatureImageHeight = (signatureConfig?.get("signatureImageHeight") as? Double)?.toFloat() ?: 50f
     val pageNumber = signatureConfig?.get("pageNumber") as? Int ?: 1
     val signatureImageBytes = signatureConfig?.get("signatureImage") as? ByteArray
     val contact = signatureConfig?.get("contact") as? String
     val signerName = signatureConfig?.get("signerName") as? String
+    val signDateString = signatureConfig?.get("signDate") as? String
+    var signDate = ""
+    if (signDateString != null) {
+      try {
+        // Tạo một parser để đọc chuỗi ISO 8601 mà Dart gửi qua
+        // Định dạng "yyyy-MM-dd'T'HH:mm:ss.SSS" khớp với đầu ra của toIso8601String()
+        val isoParser = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.getDefault())
+        // Parse chuỗi thành một đối tượng Date
+        val dateObject = isoParser.parse(signDateString)
 
+        // Bây giờ, tạo một formatter để định dạng đối tượng Date đó theo ý bạn
+        val displayFormatter = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm:ss", java.util.Locale.getDefault())
+        // Format và lấy ra chuỗi cuối cùng
+        signDate = displayFormatter.format(dateObject)
+
+      } catch (e: Exception) {
+        // Nếu có lỗi, dùng lại chuỗi gốc hoặc một giá trị mặc định
+        signDate = signDateString
+        println("DEBUG: Lỗi khi phân tích ngày tháng: ${e.message}")
+      }
+    }
     try {
       Security.addProvider(BouncyCastleProvider())
       // --- Bước 1: Chọn Applet và Xác thực PIN ---
@@ -684,25 +709,89 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
       // THÊM THÔNG TIN LIÊN HỆ VÀ TÊN NGƯỜI KÝ NẾU CÓ
       contact?.let { appearance.setContact(it) }
-      signerName?.let {
-        // Có thể cần custom implementation để hiển thị tên
-        println("DEBUG: Signer name: $it")
-      }
+      // Lấy layer 2 (lớp văn bản) từ appearance
+      val n2 = appearance.getLayer2()
+      val canvas = com.itextpdf.kernel.pdf.canvas.PdfCanvas(n2, signer.document)
+
+      // Load các file font .ttf từ thư mục assets
+      val fontBytesRegular = loadFontFromAssets("fonts/Helvetica.ttf")
+      val fontBytesBold = loadFontFromAssets("fonts/Helvetica-Bold.ttf")
+
+      // Tạo đối tượng PdfFont từ dữ liệu byte và chỉ định encoding là IDENTITY_H (cho Unicode)
+      // và chiến lược là PREFER_EMBEDDED (để nhúng font vào file)
+      val font = com.itextpdf.kernel.font.PdfFontFactory.createFont(
+        fontBytesRegular,
+        com.itextpdf.io.font.PdfEncodings.IDENTITY_H,
+        com.itextpdf.kernel.font.PdfFontFactory.EmbeddingStrategy.PREFER_EMBEDDED
+      )
+      val fontBold = com.itextpdf.kernel.font.PdfFontFactory.createFont(
+        fontBytesBold,
+        com.itextpdf.io.font.PdfEncodings.IDENTITY_H,
+        com.itextpdf.kernel.font.PdfFontFactory.EmbeddingStrategy.PREFER_EMBEDDED
+      )
+      // =======================================================================
+
+      val rect = appearance.pageRect
+      val padding = 5f
+      var textX = padding
+      var textBlockWidth = rect.width - padding * 2
+
       // THÊM ẢNH CHỮ KÝ NẾU CÓ
       if (signatureImageBytes != null) {
         try {
-          println("DEBUG: Setting signature image, size: ${signatureImageBytes.size} bytes")
+          //println("DEBUG: Setting signature image, size: ${signatureImageBytes.size} bytes")
           val imageData = com.itextpdf.io.image.ImageDataFactory.create(signatureImageBytes)
           appearance.setSignatureGraphic(imageData)
+          // Lấy layer 0 (lớp nền)
+          val n0 = appearance.getLayer0()
+          val canvas0 = com.itextpdf.kernel.pdf.canvas.PdfCanvas(n0, signer.document)
 
           // Thiết lập cách hiển thị: GRAPHIC (chỉ ảnh), GRAPHIC_AND_DESCRIPTION (ảnh + mô tả)
           appearance.renderingMode = com.itextpdf.signatures.PdfSignatureAppearance.RenderingMode.GRAPHIC_AND_DESCRIPTION
+          val imgHeight = signatureImageHeight
+          val scale = imgHeight / imageData.height
+          val imgWidth = signatureImageWidth // imageData.width * scale
 
+          val imgX = padding
+          val imgY = (rect.height - imgHeight) / 2f // Căn giữa theo chiều dọc
+          canvas0.addImageWithTransformationMatrix(imageData, imgWidth, 0f, 0f, imgHeight, imgX, imgY)
+          canvas0.release()
+          // Dịch chuyển vị trí bắt đầu và thu hẹp chiều rộng của khối văn bản
+          textX += imgWidth + padding
+          textBlockWidth -= (imgWidth + padding)
         } catch (e: Exception) {
           println("DEBUG: Failed to set signature image: ${e.message}")
-          // Tiếp tục không có ảnh nếu có lỗi
+          appearance.renderingMode = PdfSignatureAppearance.RenderingMode.DESCRIPTION
         }
       }
+      else {
+        appearance.renderingMode = PdfSignatureAppearance.RenderingMode.DESCRIPTION
+      }
+
+      // Bắt đầu vẽ văn bản
+      canvas.beginText()
+        .setFontAndSize(fontBold, 9f) // Tên người ký in đậm, cỡ 9
+        .moveText(textX.toDouble(), (rect.height - 12.0).toDouble())
+        .showText(signerName)
+        .endText() // Kết thúc vẽ tên
+
+      canvas.beginText()
+        .setFontAndSize(font, 7f) // Các thông tin khác cỡ 7
+        .moveText(textX.toDouble(), (rect.height - 24).toDouble())
+        .showText("Ngày: ${signDate}")
+        .endText() // Kết thúc vẽ các thông tin còn lại
+      canvas.beginText()
+        .setFontAndSize(font, 7f) // Các thông tin khác cỡ 7
+        .moveText(textX.toDouble(), (rect.height - 36).toDouble())
+        .showText("Email: $contact")
+        .endText()
+      canvas.beginText()
+        .setFontAndSize(font, 7f) // Các thông tin khác cỡ 7
+        .moveText(textX.toDouble(), (rect.height - 48).toDouble())
+        .showText("Location: $location")
+        .endText()
+
+      canvas.release() // Hoàn tất việc vẽ trên canvas
       // Implementation IExternalSignature cho iText 7
       val externalSignature = object : IExternalSignature {
         override fun getHashAlgorithm(): String = "SHA-256"
@@ -853,5 +942,9 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
         sCard?.close()
       }
     }
+  }
+  private fun loadFontFromAssets(path: String): ByteArray {
+    val inputStream = applicationContext.assets.open(path)
+    return inputStream.readBytes()
   }
 }

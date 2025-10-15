@@ -3,5 +3,5 @@
     <uses-permission android:name="android.permission.NFC" />
     <uses-permission android:name="android.permission.USB_PERMISSION" />
     <uses-permission android:name="org.simalliance.openmobileapi.SMARTCARD"></uses-permission>
-    <uses-feature android:name="android.hardware.usb.host"  android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" />
 </manifest>

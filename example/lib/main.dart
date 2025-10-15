@@ -197,7 +197,7 @@ class _HomePageState extends State<HomePage> {
       signDate: DateTime.now(),
       signatureImage: await _loadSignatureImage(), // Tùy chọn: load ảnh chữ ký
       signatureImageHeight: 50,
-      signatureImageWidth: 50,
+      signatureImageWidth: 100,
     );
     // 3. Gọi plugin để ký
     final signResult = await Nfcsigner.signPdf(

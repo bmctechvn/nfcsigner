@@ -1,4 +1,4 @@
-#include "linux/include/nfcsigner/nfcsigner_plugin.h"
+#include "include/nfcsigner/nfcsigner_plugin.h"
 
 #include <flutter_linux/flutter_linux.h>
 #include <gtk/gtk.h>

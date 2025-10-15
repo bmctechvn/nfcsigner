@@ -1,6 +1,5 @@
 #pragma once
 
-#include <flutter_plugin_registrar.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -10,7 +9,7 @@
 #include <PCSC/wintypes.h>
 #endif
 
-#include <flutter/method_channel.h>
+//#include <flutter/method_channel.h>
 #include <flutter/plugin_registrar.h>
 #include <flutter/standard_method_codec.h>
 

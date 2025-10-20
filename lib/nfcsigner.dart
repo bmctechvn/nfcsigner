@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'models/card_status.dart';
@@ -70,9 +71,9 @@ class Nfcsigner {
   /// Trả về một đối tượng [ServiceResult] chứa chữ ký hoặc thông tin lỗi chi tiết.
   ///
   static Future<ServiceResult<Map<String, Uint8List>>> generateXMLSignature({
-    required Uint8List dataToSign,
     required String appletID,
     required String pin,
+    required Uint8List dataToSign,
     int keyIndex = 0,
   }) async {
     try {
@@ -87,33 +88,59 @@ class Nfcsigner {
         'keyIndex': keyIndex,
       };
 
-      final Uint8List? resultData = await _channel.invokeMethod('generateXMLSignature', arguments);
+      final dynamic result = await _channel.invokeMethod('generateXMLSignature', arguments);
 
-      if (resultData != null) {
-        // Parse result
-        final String jsonString = String.fromCharCodes(resultData);
+      if (kDebugMode) {
+        print('🔍 [XML Single Session] Kiểu kết quả: ${result.runtimeType}');
+      }
+
+      Uint8List certificate;
+      Uint8List signature;
+
+      if (result is Uint8List) {
+        if (kDebugMode) {
+          print('🔍 [XML Single Session] Nhận Uint8List từ iOS');
+        }
+        // iOS trả về Uint8List chứa JSON
+        final String jsonString = String.fromCharCodes(result);
         final Map<String, dynamic> resultMap = jsonDecode(jsonString);
 
-        // Decode base64 string trở lại Uint8List
-        final certificate = base64.decode(resultMap['certificate']);
-        final signature = base64.decode(resultMap['signature']);
+        certificate = base64.decode(resultMap['certificate'] as String);
+        signature = base64.decode(resultMap['signature'] as String);
 
+      } else if (result is Map) {
         if (kDebugMode) {
-          print('✅ [XML Single Session] Ký XML thành công');
-          print('✅ [XML Single Session] Certificate length: ${certificate.length}');
-          print('✅ [XML Single Session] Signature length: ${signature.length}');
+          print('🔍 [XML Single Session] Nhận Map từ Android');
+        }
+        // Android trả về Map trực tiếp
+        final Map<dynamic, dynamic> resultMap = result;
+
+        // Xử lý cả hai trường hợp: String (base64) hoặc Uint8List
+        if (resultMap['certificate'] is String) {
+          certificate = base64.decode(resultMap['certificate'] as String);
+        } else {
+          throw Exception('Định dạng certificate không hợp lệ từ Android: ${resultMap['certificate']?.runtimeType}');
         }
 
-        return ServiceResult.success({
-          'certificate': certificate,
-          'signature': signature,
-        });
+        if (resultMap['signature'] is String) {
+          signature = base64.decode(resultMap['signature'] as String);
+        } else {
+          throw Exception('Định dạng signature không hợp lệ từ Android: ${resultMap['signature']?.runtimeType}');
+        }
       } else {
-        return ServiceResult.failure(
-          status: CardStatus.operationNotSupported,
-          message: 'Không thể ký XML',
-        );
+        throw Exception('Kiểu kết quả không được hỗ trợ: ${result.runtimeType}');
       }
+
+      if (kDebugMode) {
+        print('✅ [XML Single Session] Ký XML thành công');
+        print(
+            '✅ [XML Single Session] Certificate length: ${certificate.length}');
+        print('✅ [XML Single Session] Signature length: ${signature.length}');
+      }
+      return ServiceResult.success({
+        'certificate': certificate,
+        'signature': signature,
+      });
 
     } on PlatformException catch (e) {
       if (kDebugMode) {
@@ -268,22 +295,59 @@ class Nfcsigner {
       if (kDebugMode) {
         print("Digest: $digestInfo");
       }
+      // Platform-specific implementation
       ServiceResult<Map<String, Uint8List>> resultData;
-      // Ký DigestInfo bằng thẻ
-      resultData = await generateXMLSignature(
-        appletID: appletID,
-        pin: pin,
-        dataToSign: digestInfo,
-        keyIndex: keyIndex,
-      );
-
-      if (!resultData.isSuccess) {
-        return ServiceResult.failure(
-          status: resultData.status,
-          message: 'Lỗi ký số: ${resultData.message}',
+      if (Platform.isIOS || Platform.isAndroid) {
+        // Ký DigestInfo bằng thẻ
+        resultData = await generateXMLSignature(
+          appletID: appletID,
+          pin: pin,
+          dataToSign: digestInfo,
+          keyIndex: keyIndex,
         );
-      }
 
+        if (!resultData.isSuccess) {
+          return ServiceResult.failure(
+            status: resultData.status,
+            message: 'Lỗi ký số: ${resultData.message}',
+          );
+        }
+      }
+      else {
+        if (kDebugMode) {
+          print('🔍 [XML Signing] Sử dụng multiple sessions cho Android');
+        }
+        // Sử dụng multiple sessions approach cho Android
+        final certificateResult = await getCertificate(
+          appletID: appletID,
+          keyRole: KeyRole.sig,
+        );
+
+        if (!certificateResult.isSuccess) {
+          return ServiceResult.failure(
+            status: certificateResult.status,
+            message: 'Lỗi lấy certificate: ${certificateResult.message}',
+          );
+        }
+
+        final signatureResult = await generateSignature(
+          appletID: appletID,
+          pin: pin,
+          dataToSign: digestInfo,
+          keyIndex: keyIndex,
+        );
+
+        if (!signatureResult.isSuccess) {
+          return ServiceResult.failure(
+            status: signatureResult.status,
+            message: 'Lỗi ký số: ${signatureResult.message}',
+          );
+        }
+        resultData = ServiceResult.success({
+          'certificate': certificateResult.data!,
+          'signature': signatureResult.data!,
+        });
+      }
       // Tạo XML đã ký
       final signedXml = XmlSigner.signXml(
         xmlContent: xmlContent,

@@ -1,6 +1,6 @@
 name: nfcsigner
 description: "Plugin cho thẻ BCard cho Android, iOS, Windows"
-version: 2.0.3
+version: 2.0.4
 homepage: "https://github.com/bmctechvn/nfcsigner"
 repository: "https://github.com/bmctechvn/nfcsigner"
 

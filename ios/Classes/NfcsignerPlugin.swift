@@ -20,10 +20,10 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         // Debug thông tin NFC
-        print("=== NFC DEBUG INFO ===")
-        print("Device: \(UIDevice.current.model)")
-        print("iOS Version: \(UIDevice.current.systemVersion)")
-        print("NFC Reading Available: \(NFCNDEFReaderSession.readingAvailable)")
+        //print("=== NFC DEBUG INFO ===")
+        //print("Device: \(UIDevice.current.model)")
+        //print("iOS Version: \(UIDevice.current.systemVersion)")
+        //print("NFC Reading Available: \(NFCNDEFReaderSession.readingAvailable)")
 
         guard NFCNDEFReaderSession.readingAvailable else {
             result(FlutterError(code: "NFC_UNAVAILABLE", message: "Thiết bị không hỗ trợ NFC.", details: nil))
@@ -32,10 +32,17 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
 
         self.pendingCall = call
         self.pendingResult = result
+        // LUÔN chạy trên main thread
+        DispatchQueue.main.async {
+            self.session = NFCTagReaderSession(pollingOption: .iso14443, delegate: self, queue: nil)
+            self.session?.alertMessage = "Giữ thẻ của bạn gần đầu điện thoại."
 
-        session = NFCTagReaderSession(pollingOption: .iso14443, delegate: self, queue: nil)
-        session?.alertMessage = "Giữ thẻ của bạn gần đầu điện thoại."
-        session?.begin()
+            // Thêm delay nhỏ để đảm bảo session được tạo hoàn toàn
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.session?.begin()
+                //sprint("✅ [NFC] Session đã bắt đầu")
+            }
+        }
     }
 
     // MARK: - NFCTagReaderSessionDelegate

@@ -60,6 +60,24 @@ Thêm quyền sử dụng NFC vào file `android/app/src/main/AndroidManifest.xm
     <string>Sử dụng NFC để giao tiếp với thẻ thông minh của bạn.</string>
     ```
 
+#### USB Smart Card Support (iOS 16+)
+
+Plugin hỗ trợ ký số qua USB với đầu đọc CCID. Để kích hoạt:
+
+1.  **Thêm Smartcard Entitlement:**
+    * Tạo hoặc mở file `ios/Runner/Runner.entitlements`
+    * Thêm entitlement sau:
+    ```xml
+    <key>com.apple.security.smartcard</key>
+    <true/>
+    ```
+
+2.  **Yêu cầu phần cứng:**
+    * iPhone với USB-C (iPhone 15+): Kết nối trực tiếp với đầu đọc CCID
+    * iPhone với Lightning: Cần Lightning to USB adapter + powered USB hub
+    
+> **Lưu ý:** Plugin tự động ưu tiên USB khi phát hiện đầu đọc được kết nối. Nếu không có USB reader, sẽ fallback về NFC.
+
 ## 👨‍💻 Hướng dẫn sử dụng
 
 Dưới đây là một ví dụ đầy đủ về cách sử dụng plugin.

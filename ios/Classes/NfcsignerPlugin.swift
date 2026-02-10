@@ -4,13 +4,17 @@ import CoreNFC
 import PDFKit
 import Security
 import CommonCrypto
+import CryptoTokenKit
 
-@available(iOS 13.0, *)
+@available(iOS 16.0, *)
 public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelegate {
 
     var session: NFCTagReaderSession?
     var pendingResult: FlutterResult?
     var pendingCall: FlutterMethodCall?
+    
+    // USB Card Manager
+    private lazy var usbCardManager: UsbCardManager = UsbCardManager()
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "nfcsigner", binaryMessenger: registrar.messenger())
@@ -19,19 +23,322 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        // Debug thông tin NFC
-        //print("=== NFC DEBUG INFO ===")
-        //print("Device: \(UIDevice.current.model)")
-        //print("iOS Version: \(UIDevice.current.systemVersion)")
-        //print("NFC Reading Available: \(NFCNDEFReaderSession.readingAvailable)")
-
+        self.pendingCall = call
+        self.pendingResult = result
+        
+        // Ưu tiên USB nếu có reader được kết nối
+        if usbCardManager.isReaderConnected() {
+            print("🔌 [USB] Phát hiện đầu đọc USB, sử dụng USB path")
+            handleUsbRequest(call: call, result: result)
+            return
+        }
+        
+        // Fallback về NFC
+        print("📡 [NFC] Không có USB reader, sử dụng NFC path")
+        handleNfcRequest(call: call, result: result)
+    }
+    
+    // MARK: - USB Request Handling
+    
+    private func handleUsbRequest(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        usbCardManager.connect { [weak self] success, errorMessage in
+            guard let self = self else { return }
+            
+            if !success {
+                // Nếu USB không kết nối được, fallback về NFC
+                print("⚠️ [USB] Kết nối thất bại: \(errorMessage ?? "Unknown"), fallback về NFC")
+                self.handleNfcRequest(call: call, result: result)
+                return
+            }
+            
+            // Xử lý command qua USB
+            switch call.method {
+            case "generateSignature":
+                self.handleGenerateSignatureViaUsb(call: call, result: result)
+            case "getRsaPublicKey":
+                self.handleGetRsaPublicKeyViaUsb(call: call, result: result)
+            case "getCertificate":
+                self.handleGetCertificateViaUsb(call: call, result: result)
+            case "signPdf":
+                self.handleSignPdfViaUsb(call: call, result: result)
+            case "generateXMLSignature":
+                self.handleGenerateXMLSignatureViaUsb(call: call, result: result)
+            default:
+                self.usbCardManager.disconnect()
+                result(FlutterMethodNotImplemented)
+            }
+        }
+    }
+    
+    // MARK: - USB Operation Handlers
+    
+    private func handleGenerateSignatureViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let pin = arguments["pin"] as? String,
+              let dataToSign = arguments["dataToSign"] as? FlutterStandardTypedData,
+              let keyIndex = arguments["keyIndex"] as? Int else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        // Step 1: Select Applet
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            // Step 2: Verify PIN
+            self.usbCardManager.verifyPin(pin: pin) { success, sw1, sw2, error in
+                if !success {
+                    self.usbCardManager.disconnect()
+                    result(FlutterError(code: "AUTH_ERROR", message: "Xác thực PIN thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    return
+                }
+                
+                // Step 3: Generate Signature
+                self.usbCardManager.generateSignature(dataToSign: dataToSign.data, keyIndex: keyIndex) { signature, sw1, sw2, error in
+                    self.usbCardManager.disconnect()
+                    
+                    if let signature = signature {
+                        result(FlutterStandardTypedData(bytes: signature))
+                    } else {
+                        result(FlutterError(code: "OPERATION_NOT_SUPPORTED", message: "Ký số thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    }
+                }
+            }
+        }
+    }
+    
+    private func handleGetRsaPublicKeyViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let keyRole = arguments["keyRole"] as? String else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            self.usbCardManager.getRsaPublicKey(keyRole: keyRole) { publicKey, sw1, sw2, error in
+                self.usbCardManager.disconnect()
+                
+                if let publicKey = publicKey {
+                    result(FlutterStandardTypedData(bytes: publicKey))
+                } else {
+                    result(FlutterError(code: "OPERATION_NOT_SUPPORTED", message: "Không thể lấy khóa công khai.", details: ["sw1": sw1, "sw2": sw2]))
+                }
+            }
+        }
+    }
+    
+    private func handleGetCertificateViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let keyRole = arguments["keyRole"] as? String else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            self.usbCardManager.getCertificate(keyRole: keyRole) { certificate, sw1, sw2, error in
+                self.usbCardManager.disconnect()
+                
+                if let certificate = certificate {
+                    result(FlutterStandardTypedData(bytes: certificate))
+                } else {
+                    result(FlutterError(code: "OPERATION_NOT_SUPPORTED", message: "Không thể lấy certificate.", details: ["sw1": sw1, "sw2": sw2]))
+                }
+            }
+        }
+    }
+    
+    private func handleSignPdfViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let pdfBytes = arguments["pdfBytes"] as? FlutterStandardTypedData,
+              let hashedBytes = arguments["pdfHashBytes"] as? FlutterStandardTypedData,
+              let appletIDHex = arguments["appletID"] as? String,
+              let pin = arguments["pin"] as? String,
+              let keyIndex = arguments["keyIndex"] as? Int,
+              let reason = arguments["reason"] as? String,
+              let location = arguments["location"] as? String else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let signatureConfig = arguments["signatureConfig"] as? [String: Any]
+        let x = signatureConfig?["x"] as? Double ?? 36.0
+        let y = signatureConfig?["y"] as? Double ?? 700.0
+        let width = signatureConfig?["width"] as? Double ?? 200.0
+        let height = signatureConfig?["height"] as? Double ?? 50.0
+        let pageNumber = signatureConfig?["pageNumber"] as? Int ?? 1
+        let signatureImageBytes = signatureConfig?["signatureImage"] as? FlutterStandardTypedData
+        let contact = signatureConfig?["contact"] as? String
+        let signerName = signatureConfig?["signerName"] as? String
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        // Select Applet -> Verify PIN -> Get Certificate -> Sign
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            self.usbCardManager.verifyPin(pin: pin) { success, sw1, sw2, error in
+                if !success {
+                    self.usbCardManager.disconnect()
+                    result(FlutterError(code: "AUTH_ERROR", message: "Xác thực PIN thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    return
+                }
+                
+                // Get certificate
+                self.usbCardManager.getCertificate(keyRole: "sig") { certificateData, sw1, sw2, error in
+                    guard let certificateData = certificateData else {
+                        self.usbCardManager.disconnect()
+                        result(FlutterError(code: "CERTIFICATE_ERROR", message: "Không thể lấy certificate.", details: nil))
+                        return
+                    }
+                    
+                    // Sign the hash
+                    self.usbCardManager.generateSignature(dataToSign: hashedBytes.data, keyIndex: keyIndex) { signatureData, sw1, sw2, error in
+                        self.usbCardManager.disconnect()
+                        
+                        guard let signatureData = signatureData else {
+                            result(FlutterError(code: "SIGNING_ERROR", message: "Ký số thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                            return
+                        }
+                        
+                        // Create signed PDF
+                        do {
+                            let signedPdfData = try self.createSignedPdf(
+                                originalPdfData: pdfBytes.data,
+                                signature: signatureData,
+                                certificate: certificateData,
+                                reason: reason,
+                                location: location,
+                                x: x,
+                                y: y,
+                                width: width,
+                                height: height,
+                                pageNumber: pageNumber,
+                                signatureImageData: signatureImageBytes?.data,
+                                contact: contact,
+                                signerName: signerName
+                            )
+                            result(FlutterStandardTypedData(bytes: signedPdfData))
+                        } catch {
+                            result(FlutterError(code: "PDF_CREATION_ERROR", message: "Lỗi khi tạo PDF đã ký: \(error.localizedDescription)", details: nil))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func handleGenerateXMLSignatureViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let pin = arguments["pin"] as? String,
+              let dataToSign = arguments["dataToSign"] as? FlutterStandardTypedData,
+              let keyIndex = arguments["keyIndex"] as? Int else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            self.usbCardManager.verifyPin(pin: pin) { success, sw1, sw2, error in
+                if !success {
+                    self.usbCardManager.disconnect()
+                    result(FlutterError(code: "AUTH_ERROR", message: "Xác thực PIN thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    return
+                }
+                
+                // Generate signature
+                self.usbCardManager.generateSignature(dataToSign: dataToSign.data, keyIndex: keyIndex) { signatureData, sw1, sw2, error in
+                    guard let signatureData = signatureData else {
+                        self.usbCardManager.disconnect()
+                        result(FlutterError(code: "OPERATION_NOT_SUPPORTED", message: "Ký số thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                        return
+                    }
+                    
+                    // Get certificate
+                    self.usbCardManager.getCertificate(keyRole: "sig") { certificateData, sw1, sw2, error in
+                        self.usbCardManager.disconnect()
+                        
+                        guard let certificateData = certificateData else {
+                            result(FlutterError(code: "CERTIFICATE_ERROR", message: "Không thể lấy certificate.", details: nil))
+                            return
+                        }
+                        
+                        let resultDict: [String: Any] = [
+                            "certificate": certificateData.base64EncodedString(),
+                            "signature": signatureData.base64EncodedString()
+                        ]
+                        
+                        guard let resultData = try? JSONSerialization.data(withJSONObject: resultDict) else {
+                            result(FlutterError(code: "RESULT_ERROR", message: "Lỗi đóng gói kết quả.", details: nil))
+                            return
+                        }
+                        
+                        result(FlutterStandardTypedData(bytes: resultData))
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - NFC Request Handling
+    
+    private func handleNfcRequest(call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard NFCNDEFReaderSession.readingAvailable else {
             result(FlutterError(code: "NFC_UNAVAILABLE", message: "Thiết bị không hỗ trợ NFC.", details: nil))
             return
         }
 
-        self.pendingCall = call
-        self.pendingResult = result
         // LUÔN chạy trên main thread
         DispatchQueue.main.async {
             self.session = NFCTagReaderSession(pollingOption: .iso14443, delegate: self, queue: nil)
@@ -40,7 +347,6 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
             // Thêm delay nhỏ để đảm bảo session được tạo hoàn toàn
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.session?.begin()
-                //sprint("✅ [NFC] Session đã bắt đầu")
             }
         }
     }
@@ -99,7 +405,7 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         }
     }
 
-    // MARK: - Logic Handlers
+    // MARK: - NFC Logic Handlers
 
     private func handleGenerateSignature(tag: NFCISO7816Tag, session: NFCTagReaderSession) {
         guard let arguments = self.pendingCall?.arguments as? [String: Any],
@@ -479,14 +785,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         session: NFCTagReaderSession
     ) {
         do {
-            // Bước 1: Tính hash của PDF
-            //let pdfHash = self.calculateSHA256(data: pdfData)
-
-            // Bước 2: Tạo DigestInfo theo chuẩn PKCS#1
             let digestInfo = hashedDigest
-            //self.createDigestInfo(hash: pdfHash, hashAlgorithm: .sha256)
 
-            // Bước 3: Ký hash bằng thẻ
             let p2Sign: UInt8 = {
                 switch keyIndex {
                 case 1: return 0x9B
@@ -505,7 +805,6 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                     return
                 }
 
-                // Bước 4: Tạo PDF đã ký
                 do {
                     let signedPdfData = try self.createSignedPdf(
                         originalPdfData: pdfData,
@@ -572,38 +871,22 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
     }
 
     private func createDigestInfo(hash: Data, hashAlgorithm: HashAlgorithm) -> Data {
-        // Tạo DigestInfo theo chuẩn PKCS#1
         var digestInfo = Data()
-
-        // SEQUENCE
         digestInfo.append(0x30)
-
-        // SEQUENCE length (will be set later)
         let sequenceLengthIndex = digestInfo.count
-        digestInfo.append(0x00) // placeholder
-
-        // AlgorithmIdentifier SEQUENCE
+        digestInfo.append(0x00)
         digestInfo.append(0x30)
-
-        // AlgorithmIdentifier OID
         let algorithmOID: [UInt8] = hashAlgorithm.oid
         digestInfo.append(0x06)
         digestInfo.append(UInt8(algorithmOID.count))
         digestInfo.append(contentsOf: algorithmOID)
-
-        // NULL parameters
         digestInfo.append(0x05)
         digestInfo.append(0x00)
-
-        // OCTET STRING containing the hash
         digestInfo.append(0x04)
         digestInfo.append(UInt8(hash.count))
         digestInfo.append(contentsOf: hash)
-
-        // Update sequence length
         let sequenceLength = digestInfo.count - sequenceLengthIndex - 1
         digestInfo[sequenceLengthIndex] = UInt8(sequenceLength)
-
         return digestInfo
     }
 
@@ -633,7 +916,6 @@ private func createSignedPdf(
 
     let bounds = CGRect(x: x, y: y, width: width, height: height)
 
-    // Tạo watermark với thông tin chữ ký
     let watermarkInfo = """
     Người ký: \(signerName ?? "Unknown")
     Lý do: \(reason)
@@ -642,37 +924,30 @@ private func createSignedPdf(
     \(contact != nil ? "Liên hệ: \(contact!)" : "")
     """
 
-    // Tạo annotation watermark
     let watermarkAnnotation = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
     watermarkAnnotation.contents = watermarkInfo
     watermarkAnnotation.color = UIColor.clear
     watermarkAnnotation.font = UIFont.systemFont(ofSize: 12)
     watermarkAnnotation.fontColor = UIColor.blue
-
-    // Thêm border cho watermark
     watermarkAnnotation.border = PDFBorder()
     watermarkAnnotation.border?.lineWidth = 1.0
     watermarkAnnotation.border?.style = .solid
 
     page.addAnnotation(watermarkAnnotation)
 
-    // Thêm hình ảnh chữ ký nếu có (sử dụng phương pháp an toàn)
     if let signatureImageData = signatureImageData,
        let image = UIImage(data: signatureImageData) {
 
         let imageBounds = CGRect(x: bounds.minX + 5, y: bounds.minY + 5,
                                width: 80, height: 30)
 
-        // Tạo annotation hình ảnh
         let imageAnnotation = PDFAnnotation(bounds: imageBounds, forType: .stamp, withProperties: nil)
 
-        // Vẽ hình ảnh
         UIGraphicsBeginImageContextWithOptions(imageBounds.size, false, 0.0)
         defer { UIGraphicsEndImageContext() }
 
         image.draw(in: CGRect(origin: .zero, size: imageBounds.size))
         if let resizedImage = UIGraphicsGetImageFromCurrentImageContext() {
-            // Sử dụng key trực tiếp
             imageAnnotation.setValue(resizedImage, forAnnotationKey: PDFAnnotationKey(rawValue: "image"))
         }
 

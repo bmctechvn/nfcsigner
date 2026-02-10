@@ -3,7 +3,7 @@ package com.bmc.nfcsigner.core
 class DebugLogger(private val tag: String) {
 
     companion object {
-        const val DEBUG_USB = false
+        const val DEBUG_USB = true
     }
 
     fun debug(message: String) {

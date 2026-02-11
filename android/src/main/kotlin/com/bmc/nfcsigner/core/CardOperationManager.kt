@@ -1,16 +1,24 @@
 package com.bmc.nfcsigner.core
 
 import com.bmc.nfcsigner.models.ApduResponse
+import com.bmc.nfcsigner.usb.UsbTransceiver
 import java.io.IOException
 
 class CardOperationManager(private val transceiver: Transceiver) {
 
     private val logger = DebugLogger("CardOperationManager")
 
+    /**
+     * Delay giữa các GET RESPONSE command (ms).
+     * Trên USB composite device, cần delay nhỏ để USB pipe ổn định.
+     * Trên NFC, không cần delay.
+     */
+    private val interCommandDelayMs: Long = if (transceiver is UsbTransceiver) 15L else 0L
+
     @Throws(IOException::class)
     private fun executeCommandWithGetResponse(command: ByteArray): ApduResponse {
         val initialResponse = transceiver.transceive(command)
-        return ResponseHandler.handleGetResponse(initialResponse) { getResponseCommand ->
+        return ResponseHandler.handleGetResponse(initialResponse, interCommandDelayMs = interCommandDelayMs) { getResponseCommand ->
             transceiver.transceive(getResponseCommand)
         }
     }

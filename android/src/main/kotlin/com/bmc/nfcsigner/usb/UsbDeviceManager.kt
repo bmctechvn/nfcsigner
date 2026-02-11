@@ -23,6 +23,14 @@ class UsbDeviceManager(private val context: Context) {
     // Track additionally claimed interfaces (for composite device isolation)
     private val claimedInterfaces = mutableListOf<UsbInterface>()
 
+    // CCID descriptor parameters — read from USB descriptors
+    var ccidMaxMessageLength: Int = 65544  // Default: CCID spec max
+        private set
+    var ccidExchangeLevel: Int = 0x00020000  // Default: Short APDU
+        private set
+    var ccidDwFeatures: Int = 0
+        private set
+
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (usbPermissionAction == intent.action) {
@@ -259,6 +267,17 @@ class UsbDeviceManager(private val context: Context) {
                     logger.debug("  dwFeatures: 0x${dwFeatures.toString(16).padStart(8, '0')}")
                     logger.debug("  Exchange level: $exchangeLevel")
                     logger.debug("  dwMaxCCIDMessageLength: $dwMaxMsgLen bytes")
+
+                    // Store for use by UsbTransceiver
+                    ccidDwFeatures = dwFeatures
+                    ccidMaxMessageLength = dwMaxMsgLen
+                    ccidExchangeLevel = when {
+                        dwFeatures and 0x00040000 != 0 -> 0x00040000  // Extended APDU
+                        dwFeatures and 0x00020000 != 0 -> 0x00020000  // Short APDU
+                        dwFeatures and 0x00010000 != 0 -> 0x00010000  // TPDU
+                        else -> 0  // Character
+                    }
+
                     return
                 }
 
@@ -273,13 +292,20 @@ class UsbDeviceManager(private val context: Context) {
 
     fun createTransceiver(): UsbTransceiver? {
         return try {
+            logger.debug("Creating UsbTransceiver:")
+            logger.debug("  endpointIn maxPacketSize: ${endpointIn!!.maxPacketSize}")
+            logger.debug("  endpointOut maxPacketSize: ${endpointOut!!.maxPacketSize}")
+            logger.debug("  ccidMaxMessageLength: $ccidMaxMessageLength")
+            logger.debug("  ccidExchangeLevel: 0x${ccidExchangeLevel.toString(16)}")
+            logger.debug("  isCompositeDevice: ${usbDevice!!.interfaceCount > 1}")
             UsbTransceiver(
                 usbManager,
                 usbDevice!!,
                 usbConnection!!,
                 usbInterface!!,
                 endpointIn!!,
-                endpointOut!!
+                endpointOut!!,
+                ccidMaxMessageLength
             )
         } catch (e: Exception) {
             logger.debug("Failed to create USB transceiver: ${e.message}")

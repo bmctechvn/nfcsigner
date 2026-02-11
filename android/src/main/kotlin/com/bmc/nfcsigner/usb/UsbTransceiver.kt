@@ -13,7 +13,8 @@ class UsbTransceiver(
     private val usbConnection: UsbDeviceConnection,
     private val usbInterface: UsbInterface,
     private val endpointIn: UsbEndpoint,
-    private val endpointOut: UsbEndpoint
+    private val endpointOut: UsbEndpoint,
+    private val dwMaxCCIDMessageLength: Int = 65544
 ) : Transceiver {
 
     private val logger = DebugLogger("UsbTransceiver")
@@ -43,6 +44,13 @@ class UsbTransceiver(
 
         // Short timeout for pipe draining
         private const val DRAIN_TIMEOUT_MS: Int = 100
+
+        // Maximum number of CCID time extension requests before giving up
+        private const val MAX_TIME_EXTENSIONS: Int = 30
+
+        // Small delay between consecutive APDU commands (ms)
+        // Helps composite devices stabilize USB pipe state
+        private const val INTER_COMMAND_DELAY_MS: Long = 10
     }
 
     override fun connect() {
@@ -185,7 +193,7 @@ class UsbTransceiver(
 
     @Throws(IOException::class)
     override fun transceive(command: ByteArray): ApduResponse {
-        logger.debug("USB → ${command.toHexString()}")
+        logger.debug("USB → ${command.toHexString()} (${command.size} bytes)")
 
         val ccidMessage = createCcidMessage(command)
 
@@ -195,17 +203,158 @@ class UsbTransceiver(
             throw IOException("Failed to send CCID message: sent $sent of ${ccidMessage.size} bytes")
         }
 
-        // Receive response
-        val ccidResponse = readCcidResponse()
+        // Receive response — with time extension, CCID chaining, and composite device handling
+        val ccidResponse = readFullCcidResponse()
 
-        logger.debug("USB ← ${ccidResponse.toHexString()}")
+        logger.debug("USB ← (${ccidResponse.size} bytes) ${ccidResponse.toHexString()}")
 
         return parseCcidResponse(ccidResponse)
     }
 
     /**
+     * Đọc CCID response đầy đủ bao gồm:
+     * 1. CCID Time Extension handling (card cần thêm thời gian)
+     * 2. CCID-level response chaining (response vượt quá dwMaxCCIDMessageLength)
+     *
+     * CCID-level chaining (khác với APDU-level GET RESPONSE):
+     * - Reader chia response lớn thành nhiều RDR_to_PC_DataBlock
+     * - bChainParameter (byte 9) = 0x01/0x03: còn data tiếp theo
+     * - Host gửi empty PC_to_RDR_XfrBlock với wLevelParameter=0x0010 để yêu cầu block tiếp
+     * - Đặc biệt quan trọng trên composite device với dwMaxCCIDMessageLength nhỏ
+     */
+    @Throws(IOException::class)
+    private fun readFullCcidResponse(): ByteArray {
+        var timeExtensionCount = 0
+
+        // Read first CCID block (with time extension handling)
+        var ccidResponse = readFirstCcidBlock({ timeExtensionCount++ }, timeExtensionCount)
+
+        if (ccidResponse.size < 10) {
+            return ccidResponse
+        }
+
+        // Check bChainParameter (byte 9) for CCID-level response chaining
+        var chainParam = ccidResponse[9].toInt() and 0xFF
+
+        if (chainParam == 0x01 || chainParam == 0x03) {
+            // CCID-level chaining detected — collect all data blocks
+            logger.debug("CCID response chaining detected (bChainParameter=0x${chainParam.toString(16)})")
+            logger.debug("  dwMaxCCIDMessageLength=$dwMaxCCIDMessageLength, first block: ${ccidResponse.size} bytes")
+
+            // Extract APDU data from the first block
+            val firstDataLength = extractDataLength(ccidResponse)
+            val allData = mutableListOf<Byte>()
+            if (firstDataLength > 0 && 10 + firstDataLength <= ccidResponse.size) {
+                allData.addAll(ccidResponse.copyOfRange(10, 10 + firstDataLength).toList())
+            }
+
+            var blockCount = 1
+
+            // Request continuation blocks until complete
+            while (chainParam == 0x01 || chainParam == 0x03) {
+                blockCount++
+
+                // Send empty XfrBlock requesting next data block
+                val continueMsg = createCcidContinueRequest()
+                val sent = usbConnection.bulkTransfer(endpointOut, continueMsg, continueMsg.size, SEND_TIMEOUT_MS)
+                if (sent != continueMsg.size) {
+                    throw IOException("Failed to send CCID continue request: sent $sent of ${continueMsg.size}")
+                }
+
+                // Read next block (with time extension handling)
+                val nextBlock = readFirstCcidBlock({ timeExtensionCount++ }, timeExtensionCount)
+
+                if (nextBlock.size < 10) {
+                    logger.debug("CCID chain block $blockCount: too short (${nextBlock.size} bytes), stopping")
+                    break
+                }
+
+                // Verify it's a DataBlock
+                val msgType = nextBlock[0].toInt() and 0xFF
+                if (msgType != RDR_TO_PC_DATA_BLOCK) {
+                    logger.debug("CCID chain block $blockCount: unexpected type 0x${msgType.toString(16)}")
+                    break
+                }
+
+                // Extract data from this block
+                val blockDataLen = extractDataLength(nextBlock)
+                if (blockDataLen > 0 && 10 + blockDataLen <= nextBlock.size) {
+                    allData.addAll(nextBlock.copyOfRange(10, 10 + blockDataLen).toList())
+                }
+
+                chainParam = nextBlock[9].toInt() and 0xFF
+                logger.debug("CCID chain block $blockCount: ${blockDataLen} bytes, chainParam=0x${chainParam.toString(16)}, total=${allData.size}")
+            }
+
+            logger.debug("CCID chaining complete: $blockCount blocks, ${allData.size} total APDU bytes")
+
+            // Reconstruct a single CCID message with all data
+            val totalData = allData.toByteArray()
+            val assembled = ByteArray(10 + totalData.size)
+            // Copy header from first block
+            System.arraycopy(ccidResponse, 0, assembled, 0, 10)
+            // Update data length in header
+            assembled[1] = (totalData.size and 0xFF).toByte()
+            assembled[2] = ((totalData.size shr 8) and 0xFF).toByte()
+            assembled[3] = ((totalData.size shr 16) and 0xFF).toByte()
+            assembled[4] = ((totalData.size shr 24) and 0xFF).toByte()
+            // Clear chain parameter
+            assembled[9] = 0x00
+            // Copy assembled data
+            System.arraycopy(totalData, 0, assembled, 10, totalData.size)
+
+            return assembled
+        }
+
+        return ccidResponse
+    }
+
+    /**
+     * Đọc một CCID block với xử lý Time Extension.
+     */
+    @Throws(IOException::class)
+    private fun readFirstCcidBlock(onTimeExtension: () -> Unit, currentExtCount: Int): ByteArray {
+        var extensionCount = currentExtCount
+
+        while (true) {
+            val ccidResponse = readCcidResponse()
+
+            if (ccidResponse.size < 10) {
+                return ccidResponse
+            }
+
+            val bStatus = ccidResponse[7].toInt() and 0xFF
+            val commandStatus = (bStatus shr 6) and 0x03
+
+            // commandStatus == 2 → Time Extension request
+            if (commandStatus == 2) {
+                extensionCount++
+                onTimeExtension()
+                logger.debug("CCID Time Extension #$extensionCount — card needs more time")
+
+                if (extensionCount > MAX_TIME_EXTENSIONS) {
+                    throw IOException("Card exceeded maximum time extensions ($MAX_TIME_EXTENSIONS)")
+                }
+                continue
+            }
+
+            if (extensionCount > currentExtCount) {
+                logger.debug("Card responded after ${extensionCount - currentExtCount} time extension(s)")
+            }
+
+            return ccidResponse
+        }
+    }
+
+    /**
      * Đọc CCID response từ USB IN pipe.
      * Đảm bảo đọc đủ data theo data length trong CCID header.
+     *
+     * QUAN TRỌNG cho composite device:
+     * - Sử dụng buffer riêng + System.arraycopy thay vì offset-based bulkTransfer
+     *   (5-param API có known issues trên một số Android chipsets/composite USB)
+     * - Composite device thường chia CCID response thành nhiều USB packet
+     *   (~250 bytes = max packet size của Bulk endpoint)
      */
     @Throws(IOException::class)
     private fun readCcidResponse(): ByteArray {
@@ -224,25 +373,32 @@ class UsbTransceiver(
             val expectedTotal = 10 + expectedDataLength
 
             if (received < expectedTotal) {
-                // Chưa đủ data → đọc tiếp
+                // Chưa đủ data → đọc tiếp bằng buffer riêng + System.arraycopy
+                // KHÔNG dùng offset-based bulkTransfer(5-param) — unreliable trên composite device
                 logger.debug("Partial CCID response: got $received of $expectedTotal bytes, reading more...")
-                val fullBuffer = responseBuffer.copyOf(expectedTotal)
+                val fullBuffer = ByteArray(maxOf(expectedTotal, RESPONSE_BUFFER_SIZE))
+                System.arraycopy(responseBuffer, 0, fullBuffer, 0, received)
                 var totalReceived = received
 
                 while (totalReceived < expectedTotal) {
-                    val remaining = expectedTotal - totalReceived
+                    // Đọc vào buffer tạm riêng biệt — tránh issues với offset-based API
+                    val tempBuffer = ByteArray(RESPONSE_BUFFER_SIZE)
                     val extra = usbConnection.bulkTransfer(
                         endpointIn,
-                        fullBuffer,
-                        totalReceived,
-                        remaining,
+                        tempBuffer,
+                        tempBuffer.size,
                         RECEIVE_TIMEOUT_MS
                     )
                     if (extra <= 0) {
-                        logger.debug("Failed to read remaining CCID data: got $totalReceived of $expectedTotal")
+                        logger.debug("Failed to read remaining CCID data: got $totalReceived of $expectedTotal bytes (extra=$extra)")
                         break
                     }
-                    totalReceived += extra
+
+                    // Copy vào fullBuffer, giới hạn không vượt quá expectedTotal
+                    val copyLen = minOf(extra, expectedTotal - totalReceived)
+                    System.arraycopy(tempBuffer, 0, fullBuffer, totalReceived, copyLen)
+                    totalReceived += copyLen
+                    logger.debug("Read $extra more bytes, total: $totalReceived / $expectedTotal")
                 }
 
                 return fullBuffer.copyOf(totalReceived)
@@ -273,14 +429,51 @@ class UsbTransceiver(
         return message
     }
 
+    /**
+     * Tạo CCID continue request — empty PC_to_RDR_XfrBlock với wLevelParameter = 0x0010.
+     * Dùng để yêu cầu reader gửi block tiếp theo trong CCID-level response chaining.
+     */
+    private fun createCcidContinueRequest(): ByteArray {
+        val message = ByteArray(10)
+        message[0] = PC_TO_RDR_XFR_BLOCK  // Message Type
+
+        // Data length = 0 (empty XfrBlock)
+        message[1] = 0x00
+        message[2] = 0x00
+        message[3] = 0x00
+        message[4] = 0x00
+
+        message[5] = 0x00  // Slot number
+        message[6] = nextSequenceNumber().toByte()  // Sequence number
+        message[7] = 0x00  // BWI
+        message[8] = 0x10  // wLevelParameter = 0x0010 (request next data block)
+        message[9] = 0x00  // wLevelParameter high byte
+
+        return message
+    }
+
     private fun parseCcidResponse(ccidResponse: ByteArray): ApduResponse {
         if (ccidResponse.size < 10) {
             throw IOException("CCID response too short: ${ccidResponse.size} bytes")
         }
 
         val messageType = ccidResponse[0].toInt() and 0xFF
-        if (messageType != RDR_TO_PC_DATA_BLOCK) {
-            throw IOException("Unexpected CCID message type: 0x${messageType.toString(16)}")
+
+        when (messageType) {
+            RDR_TO_PC_DATA_BLOCK -> {
+                // Normal data response — parse APDU
+            }
+            RDR_TO_PC_SLOT_STATUS -> {
+                // SlotStatus (0x81) — composite device có thể trả về khi card state thay đổi
+                // Chỉ chứa status, không có APDU data
+                logger.debug("Received RDR_to_PC_SlotStatus instead of DataBlock")
+                val bStatus = ccidResponse[7].toInt() and 0xFF
+                val bError = ccidResponse[8].toInt() and 0xFF
+                throw IOException("Card returned SlotStatus: bStatus=0x${bStatus.toString(16)}, bError=0x${bError.toString(16)}. Card may need power cycle.")
+            }
+            else -> {
+                throw IOException("Unexpected CCID message type: 0x${messageType.toString(16)}")
+            }
         }
 
         // Check ICC status and error

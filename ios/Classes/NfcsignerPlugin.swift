@@ -7,6 +7,21 @@ import CommonCrypto
 import CryptoTokenKit
 
 @available(iOS 16.0, *)
+class ImageAnnotation: PDFAnnotation {
+    var image: UIImage?
+    
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        super.draw(with: box, in: context)
+        
+        guard let image = image, let cgImage = image.cgImage else { return }
+        
+        context.saveGState()
+        context.draw(cgImage, in: self.bounds)
+        context.restoreGState()
+    }
+}
+
+@available(iOS 16.0, *)
 public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelegate {
 
     var session: NFCTagReaderSession?
@@ -202,6 +217,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         let height = signatureConfig?["height"] as? Double ?? 50.0
         let pageNumber = signatureConfig?["pageNumber"] as? Int ?? 1
         let signatureImageBytes = signatureConfig?["signatureImage"] as? FlutterStandardTypedData
+        let signatureImageWidth = signatureConfig?["signatureImageWidth"] as? Double ?? 80.0
+        let signatureImageHeight = signatureConfig?["signatureImageHeight"] as? Double ?? 30.0
         let contact = signatureConfig?["contact"] as? String
         let signerName = signatureConfig?["signerName"] as? String
         
@@ -255,6 +272,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                                 height: height,
                                 pageNumber: pageNumber,
                                 signatureImageData: signatureImageBytes?.data,
+                                signatureImageWidth: signatureImageWidth,
+                                signatureImageHeight: signatureImageHeight,
                                 contact: contact,
                                 signerName: signerName
                             )
@@ -602,6 +621,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         let height = signatureConfig?["height"] as? Double ?? 50.0
         let pageNumber = signatureConfig?["pageNumber"] as? Int ?? 1
         let signatureImageBytes = signatureConfig?["signatureImage"] as? FlutterStandardTypedData
+        let signatureImageWidth = signatureConfig?["signatureImageWidth"] as? Double ?? 80.0
+        let signatureImageHeight = signatureConfig?["signatureImageHeight"] as? Double ?? 30.0
         let contact = signatureConfig?["contact"] as? String
         let signerName = signatureConfig?["signerName"] as? String
 
@@ -648,6 +669,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                         height: height,
                         pageNumber: pageNumber,
                         signatureImageData: signatureImageBytes?.data,
+                        signatureImageWidth: signatureImageWidth,
+                        signatureImageHeight: signatureImageHeight,
                         contact: contact,
                         signerName: signerName,
                         session: session
@@ -780,6 +803,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         height: Double,
         pageNumber: Int,
         signatureImageData: Data?,
+        signatureImageWidth: Double,
+        signatureImageHeight: Double,
         contact: String?,
         signerName: String?,
         session: NFCTagReaderSession
@@ -818,6 +843,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                         height: height,
                         pageNumber: pageNumber,
                         signatureImageData: signatureImageData,
+                        signatureImageWidth: signatureImageWidth,
+                        signatureImageHeight: signatureImageHeight,
                         contact: contact,
                         signerName: signerName
                     )
@@ -902,6 +929,8 @@ private func createSignedPdf(
     height: Double,
     pageNumber: Int,
     signatureImageData: Data?,
+    signatureImageWidth: Double,
+    signatureImageHeight: Double,
     contact: String?,
     signerName: String?
 ) throws -> Data {
@@ -938,18 +967,13 @@ private func createSignedPdf(
     if let signatureImageData = signatureImageData,
        let image = UIImage(data: signatureImageData) {
 
+        let imgWidth = signatureImageWidth
+        let imgHeight = signatureImageHeight
         let imageBounds = CGRect(x: bounds.minX + 5, y: bounds.minY + 5,
-                               width: 80, height: 30)
+                               width: imgWidth, height: imgHeight)
 
-        let imageAnnotation = PDFAnnotation(bounds: imageBounds, forType: .stamp, withProperties: nil)
-
-        UIGraphicsBeginImageContextWithOptions(imageBounds.size, false, 0.0)
-        defer { UIGraphicsEndImageContext() }
-
-        image.draw(in: CGRect(origin: .zero, size: imageBounds.size))
-        if let resizedImage = UIGraphicsGetImageFromCurrentImageContext() {
-            imageAnnotation.setValue(resizedImage, forAnnotationKey: PDFAnnotationKey(rawValue: "image"))
-        }
+        let imageAnnotation = ImageAnnotation(bounds: imageBounds, forType: .stamp, withProperties: nil)
+        imageAnnotation.image = image
 
         page.addAnnotation(imageAnnotation)
     }

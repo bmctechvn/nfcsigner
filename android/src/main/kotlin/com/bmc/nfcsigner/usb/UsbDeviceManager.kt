@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.*
+import android.os.Build
+import androidx.core.content.ContextCompat
 import com.bmc.nfcsigner.core.DebugLogger
 
 class UsbDeviceManager(private val context: Context) {
@@ -52,17 +54,39 @@ class UsbDeviceManager(private val context: Context) {
     }
 
     init {
-        val filter = IntentFilter(usbPermissionAction)
-        context.registerReceiver(usbReceiver, filter)
+        try {
+            val filter = IntentFilter(usbPermissionAction)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+ requires RECEIVER_NOT_EXPORTED flag
+                ContextCompat.registerReceiver(
+                    context, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                context.registerReceiver(usbReceiver, filter)
+            }
+            logger.debug("USB permission receiver registered")
+        } catch (e: Exception) {
+            logger.debug("Failed to register USB receiver: ${e.message}")
+        }
     }
 
     fun isSmartCardReaderConnected(): Boolean {
         val deviceList = usbManager.deviceList
+        logger.debug("USB device scan: ${deviceList.size} device(s) found")
         for (device in deviceList.values) {
+            logger.debug("  Device: ${device.deviceName} VID=0x${device.vendorId.toString(16)} PID=0x${device.productId.toString(16)} interfaces=${device.interfaceCount}")
+            for (i in 0 until device.interfaceCount) {
+                val intf = device.getInterface(i)
+                logger.debug("    Interface $i: class=0x${intf.interfaceClass.toString(16)} subclass=0x${intf.interfaceSubclass.toString(16)} protocol=0x${intf.interfaceProtocol.toString(16)}")
+            }
             if (isSmartCardReader(device)) {
+                logger.debug("  → Smart Card reader detected!")
                 usbDevice = device
                 return true
             }
+        }
+        if (deviceList.isEmpty()) {
+            logger.debug("No USB devices found. Possible causes: USB OTG not supported, no permission, or device not enumerated yet")
         }
         return false
     }
@@ -70,7 +94,7 @@ class UsbDeviceManager(private val context: Context) {
     private fun isSmartCardReader(device: UsbDevice): Boolean {
         for (i in 0 until device.interfaceCount) {
             val usbInterface = device.getInterface(i)
-            if (usbInterface.interfaceClass == 0x0B) { // Smart Card class
+            if (usbInterface.interfaceClass == 0x0B) { // Smart Card class (CCID)
                 return true
             }
         }

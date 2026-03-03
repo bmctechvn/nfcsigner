@@ -44,10 +44,25 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "nfcsigner")
     channel.setMethodCallHandler(this)
     applicationContext = flutterPluginBinding.applicationContext
+    
+    // Initialize debug logger first (before any logging calls)
+    DebugLogger.init(applicationContext)
+    
     nfcAdapter = NfcAdapter.getDefaultAdapter(applicationContext)
 
     // Initialize managers
     nfcCardManager = NfcCardManager()
+
+    // Initialize USB managers early with applicationContext
+    // (đủ để scan USB devices, permissions sẽ cần Activity context sau)
+    try {
+      usbDeviceManager = UsbDeviceManager(applicationContext)
+      usbCardManager = UsbCardManager(usbDeviceManager)
+      logger.debug("Plugin attached to engine. USB device manager initialized.")
+    } catch (e: Exception) {
+      logger.debug("Failed to initialize USB managers: ${e.message}")
+      logger.debug("Stack: ${e.stackTraceToString()}")
+    }
   }
 
   override fun onMethodCall(call: MethodCall, result: Result) {
@@ -256,7 +271,10 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
   // USB Handling
   private fun isUsbReaderConnected(): Boolean {
-    if (!this::usbDeviceManager.isInitialized) return false
+    if (!this::usbDeviceManager.isInitialized) {
+      logger.debug("usbDeviceManager not initialized yet!")
+      return false
+    }
     return usbDeviceManager.isSmartCardReaderConnected()
   }
 
@@ -298,8 +316,10 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   // Activity Aware methods
   override fun onAttachedToActivity(binding: ActivityPluginBinding) {
     currentActivity = binding.activity
+    // Re-initialize with Activity context (needed for USB permissions)
     usbDeviceManager = UsbDeviceManager(binding.activity)
     usbCardManager = UsbCardManager(usbDeviceManager)
+    logger.debug("Plugin attached to activity. USB device manager re-initialized with Activity context.")
   }
 
   override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {

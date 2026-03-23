@@ -208,8 +208,7 @@ class _HomePageState extends State<HomePage> {
       pin: '123456',
       reason: 'Ky nhay tam thoi',
       location: 'Hanoi',
-      signatureConfig: signatureConfig, // TRUYỀN CẤU HÌNH VÀO
-      signatureLength: 512,
+      signatureConfig: signatureConfig,
     );
 
     // 4. Xử lý kết quả

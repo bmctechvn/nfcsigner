@@ -5,6 +5,7 @@ import com.bmc.nfcsigner.core.DebugLogger
 import com.bmc.nfcsigner.core.CardOperationManager
 import com.bmc.nfcsigner.models.SignatureConfig
 import com.itextpdf.kernel.pdf.*
+import com.itextpdf.kernel.utils.XmlProcessorCreator
 import com.itextpdf.signatures.*
 import com.itextpdf.kernel.geom.Rectangle
 import com.itextpdf.io.image.ImageDataFactory
@@ -28,6 +29,10 @@ class PdfSigningHelper(private val context: Context) {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
             Security.addProvider(BouncyCastleProvider())
         }
+
+        // Fix iText 7.2.5 trên Android: thay thế DefaultSafeXmlParserFactory
+        // vì Android's XML parser không hỗ trợ setXIncludeAware()
+        XmlProcessorCreator.setXmlParserFactory(AndroidXmlParserFactory())
     }
 
     fun signPdf(
@@ -41,7 +46,7 @@ class PdfSigningHelper(private val context: Context) {
         pdfHashBytes: ByteArray,
         signatureConfig: SignatureConfig
     ): ByteArray {
-        logger.debug("Starting PDF signing process")
+        logger.debug("Starting PDF signing process (${pdfBytes.size} bytes)")
 
         // Select applet and verify PIN
         if (!cardOperationManager.selectApplet(hexStringToByteArray(appletID))) {
@@ -54,37 +59,54 @@ class PdfSigningHelper(private val context: Context) {
         }
 
         // Get certificate
+        logger.debug("Getting certificate from card...")
         val certificateBytes = cardOperationManager.getCertificate("sig")
         if (certificateBytes.isEmpty()) {
             throw IllegalStateException("Empty certificate received from card")
         }
+        logger.debug("Certificate received: ${certificateBytes.size} bytes")
 
         val certificate = parseCertificate(certificateBytes)
         val certificateChain = arrayOf(certificate)
+        logger.debug("Certificate parsed: ${certificate.subjectDN}")
 
-        // Prepare PDF signing
+        // Prepare PDF signing — use try-finally to ensure reader is closed
         val reader = PdfReader(ByteArrayInputStream(pdfBytes))
-        val signedPdfStream = ByteArrayOutputStream()
-        val stampingProperties = StampingProperties()
-        val signer = PdfSigner(reader, signedPdfStream, stampingProperties)
+        try {
+            val signedPdfStream = ByteArrayOutputStream()
+            val stampingProperties = StampingProperties()
+            val signer = PdfSigner(reader, signedPdfStream, stampingProperties)
 
-        // Configure signature appearance
-        configureSignatureAppearance(signer, signatureConfig, reason, location)
+            // Configure signature appearance
+            logger.debug("Configuring signature appearance...")
+            configureSignatureAppearance(signer, signatureConfig, reason, location)
 
-        // Create external signature
-        val externalSignature = createExternalSignature(cardOperationManager, pdfHashBytes, keyIndex)
+            // Create external signature
+            val externalSignature = createExternalSignature(cardOperationManager, pdfHashBytes, keyIndex)
 
-        // Perform signing
-        signer.signDetached(
-            BouncyCastleDigest(),
-            externalSignature,
-            certificateChain,
-            null, null, null, 0,
-            PdfSigner.CryptoStandard.CMS
-        )
+            // Perform signing
+            logger.debug("Calling signDetached...")
+            signer.signDetached(
+                BouncyCastleDigest(),
+                externalSignature,
+                certificateChain,
+                null, null, null, 0,
+                PdfSigner.CryptoStandard.CMS
+            )
 
-        logger.debug("PDF signing completed successfully")
-        return signedPdfStream.toByteArray()
+            logger.debug("PDF signing completed successfully (${signedPdfStream.size()} bytes)")
+            return signedPdfStream.toByteArray()
+        } catch (e: Exception) {
+            logger.debug("PDF signing failed: ${e.message}")
+            logger.debug("Stack trace: ${e.stackTraceToString()}")
+            throw e
+        } finally {
+            try {
+                reader.close()
+            } catch (e: Exception) {
+                logger.debug("Error closing PdfReader (non-fatal): ${e.message}")
+            }
+        }
     }
 
     private fun configureSignatureAppearance(

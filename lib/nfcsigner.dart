@@ -227,8 +227,7 @@ class Nfcsigner {
     String reason = "Ký duyệt!",
     String location = "Hanoi",
     PdfSignatureConfig? signatureConfig,
-    Uint8List? pdfHashBytes,
-    int signatureLength = 512, // Hoặc 256 tùy vào khóa
+    required Uint8List pdfHashBytes,
   }) async {
     try {
       final Map<String, dynamic> arguments = {
@@ -240,7 +239,6 @@ class Nfcsigner {
         'location': location,
         'signatureConfig': signatureConfig?.toMap(),
         'pdfHashBytes': pdfHashBytes,
-        'signatureLength': 512, // Hoặc 256 tùy vào khóa
       };
 
       final dynamic result = await _channel.invokeMethod('signPdf', arguments);

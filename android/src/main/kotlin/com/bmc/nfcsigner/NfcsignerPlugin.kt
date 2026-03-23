@@ -217,6 +217,8 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       result.success(signedPdf)
 
     } catch (e: Exception) {
+      logger.debug("PDF signing error: ${e.message}")
+      logger.debug("Stack: ${e.stackTraceToString()}")
       result.error("PDF_SIGN_ERROR", "Lỗi khi ký PDF: ${e.message}", null)
     }
   }
@@ -282,10 +284,9 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
     CoroutineScope(Dispatchers.IO).launch {
       try {
         val success = usbCardManager.executeWithUsbCard { cardManager ->
-          // Chuyển về main thread để gọi result
-          withContext(Dispatchers.Main) {
-            executeCommand(cardManager, call, result)
-          }
+          // Chạy card operations + PDF processing trên IO thread
+          // Chỉ switch sang Main thread khi gọi Flutter result callback
+          executeCommandOnIoThread(cardManager, call, result)
         }
 
         if (!success) {
@@ -296,6 +297,45 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       } catch (e: Exception) {
         withContext(Dispatchers.Main) {
           result.error("USB_COMM_ERROR", "Lỗi giao tiếp USB: ${e.message}", null)
+        }
+      }
+    }
+  }
+
+  /**
+   * Thực thi command trên IO thread.
+   * Mỗi handler tự chịu trách nhiệm switch sang Main thread khi gọi result.
+   */
+  private suspend fun executeCommandOnIoThread(cardManager: CardOperationManager, call: MethodCall, result: Result) {
+    when (call.method) {
+      "signPdf" -> {
+        // PDF signing chạy hoàn toàn trên IO thread (heavy iText processing)
+        try {
+          val pdfBytes = call.argument<ByteArray>("pdfBytes")!!
+          val appletID = call.argument<String>("appletID")!!
+          val pin = call.argument<String>("pin")!!
+          val keyIndex = call.argument<Int>("keyIndex")!!
+          val reason = call.argument<String>("reason")!!
+          val location = call.argument<String>("location")!!
+          val pdfHashBytes = call.argument<ByteArray>("pdfHashBytes")!!
+          val signatureConfig = SignatureConfig.fromMap(call.argument<Map<String, Any>>("signatureConfig"))
+
+          pdfSigningHelper = PdfSigningHelper(applicationContext)
+          val signedPdf = pdfSigningHelper.signPdf(
+            pdfBytes, cardManager, appletID, pin, keyIndex, reason, location, pdfHashBytes, signatureConfig
+          )
+
+          withContext(Dispatchers.Main) { result.success(signedPdf) }
+        } catch (e: Exception) {
+          logger.debug("PDF signing error: ${e.message}")
+          logger.debug("Stack: ${e.stackTraceToString()}")
+          withContext(Dispatchers.Main) { result.error("PDF_SIGN_ERROR", "Lỗi khi ký PDF: ${e.message}", null) }
+        }
+      }
+      else -> {
+        // Các command khác chạy trên Main thread (nhẹ, cần Flutter result)
+        withContext(Dispatchers.Main) {
+          executeCommand(cardManager, call, result)
         }
       }
     }

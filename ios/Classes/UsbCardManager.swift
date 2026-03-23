@@ -12,6 +12,15 @@ class UsbCardManager: NSObject {
     private var currentSlot: TKSmartCardSlot?
     private var currentCard: TKSmartCard?
     
+    /// Composite device flag — set when slot name contains "AIO"
+    /// On composite devices, APDUs are wrapped in CCID tunnel (CLA=0xB0 INS=0xF0)
+    /// to avoid CryptoTokenKit hanging on large responses
+    private var isCompositeDevice = false
+    
+    /// Tunnel APDU constants (must match ccid_tunnel.c)
+    private static let tunnelCLA: UInt8 = 0xB0
+    private static let tunnelINS: UInt8 = 0xF0
+    
     private let logger = UsbLogger()
     
     // MARK: - Initialization
@@ -63,6 +72,12 @@ class UsbCardManager: NSObject {
             
             self.currentSlot = slot
             self.logger.debug("Slot state: \(slot.state.rawValue)")
+            
+            // Detect composite device by slot name
+            self.isCompositeDevice = firstSlotName.contains("AIO")
+            if self.isCompositeDevice {
+                self.logger.debug("Composite device detected — using CCID tunnel")
+            }
             
             // Check if card is present
             guard slot.state == .validCard else {
@@ -137,7 +152,45 @@ class UsbCardManager: NSObject {
         
         logger.debug("TX: \(apdu.hexString)")
         
-        card.transmit(apdu) { [weak self] response, error in
+        if isCompositeDevice {
+            // Composite: send via CCID tunnel with chunked response
+            transmitViaTunnel(card: card, apdu: apdu, completion: completion)
+        } else {
+            // Direct transmit
+            card.transmit(apdu) { [weak self] response, error in
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.logger.debug("Transmit error: \(error.localizedDescription)")
+                    completion(Data(), 0, 0, error)
+                    return
+                }
+                
+                guard let response = response, response.count >= 2 else {
+                    completion(Data(), 0, 0, NSError(domain: "UsbCardManager", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Phản hồi quá ngắn hoặc nil"]))
+                    return
+                }
+                
+                let sw1 = response[response.count - 2]
+                let sw2 = response[response.count - 1]
+                let data = response.dropLast(2)
+                
+                self.logger.debug("RX: \(response.hexString) (SW: \(String(format: "%02X%02X", sw1, sw2)))")
+                completion(Data(data), sw1, sw2, nil)
+            }
+        }
+    }
+    
+    /// Transmit APDU via CCID tunnel with chunked response handling
+    /// FW handles 61xx GET RESPONSE internally, returns complete card response in chunks
+    private func transmitViaTunnel(card: TKSmartCard, apdu: Data, completion: @escaping (Data, UInt8, UInt8, Error?) -> Void) {
+        // P2=0x00: execute APDU, get first chunk
+        var tunnelApdu = Data([UsbCardManager.tunnelCLA, UsbCardManager.tunnelINS, 0x00, 0x00, UInt8(apdu.count)])
+        tunnelApdu.append(apdu)
+        logger.debug("Tunnel TX: \(tunnelApdu.hexString)")
+        
+        card.transmit(tunnelApdu) { [weak self] response, error in
             guard let self = self else { return }
             
             if let error = error {
@@ -152,14 +205,88 @@ class UsbCardManager: NSObject {
                 return
             }
             
-            let sw1 = response[response.count - 2]
-            let sw2 = response[response.count - 1]
-            let data = response.dropLast(2)
+            // Strip tunnel SW
+            let tunnelSW1 = response[response.count - 2]
+            let tunnelSW2 = response[response.count - 1]
+            if tunnelSW1 != 0x90 || tunnelSW2 != 0x00 {
+                self.logger.debug("Tunnel error: SW=\(String(format: "%02X%02X", tunnelSW1, tunnelSW2))")
+                completion(Data(), 0, 0, NSError(domain: "UsbCardManager", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Tunnel error"]))
+                return
+            }
             
-            self.logger.debug("RX: \(response.hexString) (SW: \(String(format: "%02X%02X", sw1, sw2)))")
+            let firstChunk = Data(response.dropLast(2))
             
-            completion(Data(data), sw1, sw2, nil)
+            // Max data per chunk (CCID_TUNNEL_MAX_PAYLOAD = dwMaxCCIDMsg(271) - header(10) - tunnelSW(2))
+            let maxChunkSize = 259
+            
+            if firstChunk.count < maxChunkSize {
+                // Complete response in one chunk — parse card SW
+                self.parseTunnelCardResponse(firstChunk, completion: completion)
+            } else {
+                // Need more chunks — accumulate via P2=0x01
+                self.readRemainingChunks(card: card, accumulated: firstChunk, maxChunkSize: maxChunkSize, completion: completion)
+            }
         }
+    }
+    
+    /// Read remaining chunks from tunnel (P2=0x01)
+    private func readRemainingChunks(card: TKSmartCard, accumulated: Data, maxChunkSize: Int, completion: @escaping (Data, UInt8, UInt8, Error?) -> Void) {
+        // P2=0x01: get next chunk (no Lc, no data)
+        let continueTunnel = Data([UsbCardManager.tunnelCLA, UsbCardManager.tunnelINS, 0x00, 0x01])
+        
+        card.transmit(continueTunnel) { [weak self] response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.logger.debug("Tunnel continue error: \(error.localizedDescription)")
+                completion(Data(), 0, 0, error)
+                return
+            }
+            
+            guard let response = response, response.count >= 2 else {
+                completion(Data(), 0, 0, NSError(domain: "UsbCardManager", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Tunnel continue response too short"]))
+                return
+            }
+            
+            let tunnelSW1 = response[response.count - 2]
+            let tunnelSW2 = response[response.count - 1]
+            if tunnelSW1 != 0x90 || tunnelSW2 != 0x00 {
+                self.logger.debug("Tunnel continue error: SW=\(String(format: "%02X%02X", tunnelSW1, tunnelSW2))")
+                completion(Data(), 0, 0, NSError(domain: "UsbCardManager", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Tunnel continue error"]))
+                return
+            }
+            
+            let chunk = Data(response.dropLast(2))
+            var total = accumulated
+            total.append(chunk)
+            
+            if chunk.count < maxChunkSize {
+                // Last chunk — parse complete card response
+                self.parseTunnelCardResponse(total, completion: completion)
+            } else {
+                // More chunks needed
+                self.readRemainingChunks(card: card, accumulated: total, maxChunkSize: maxChunkSize, completion: completion)
+            }
+        }
+    }
+    
+    /// Parse complete card response from tunnel (data + card SW)
+    private func parseTunnelCardResponse(_ cardResponse: Data, completion: @escaping (Data, UInt8, UInt8, Error?) -> Void) {
+        guard cardResponse.count >= 2 else {
+            completion(Data(), 0, 0, NSError(domain: "UsbCardManager", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Card response quá ngắn"]))
+            return
+        }
+        
+        let sw1 = cardResponse[cardResponse.count - 2]
+        let sw2 = cardResponse[cardResponse.count - 1]
+        let data = cardResponse.dropLast(2)
+        
+        logger.debug("RX: \(cardResponse.hexString) (SW: \(String(format: "%02X%02X", sw1, sw2)))")
+        completion(Data(data), sw1, sw2, nil)
     }
     
     /// Send APDU command with automatic GET RESPONSE handling for chained responses

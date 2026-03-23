@@ -11,7 +11,7 @@ class ImageAnnotation: PDFAnnotation {
     var image: UIImage?
     
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        super.draw(with: box, in: context)
+        // Do NOT call super.draw() — it renders default stamp border + X diagonals
         
         guard let image = image, let cgImage = image.cgImage else { return }
         
@@ -945,6 +945,28 @@ private func createSignedPdf(
 
     let bounds = CGRect(x: x, y: y, width: width, height: height)
 
+    // Calculate layout: image left column, text right column
+    var textBounds = bounds
+    if let signatureImageData = signatureImageData,
+       let image = UIImage(data: signatureImageData) {
+        let imgWidth = signatureImageWidth
+        let imgHeight = signatureImageHeight
+
+        // Image annotation — left column, vertically centered
+        let imgY = bounds.minY + (bounds.height - imgHeight) / 2.0
+        let imageBounds = CGRect(x: bounds.minX + 2, y: imgY,
+                                 width: imgWidth, height: imgHeight)
+
+        let imageAnnotation = ImageAnnotation(bounds: imageBounds, forType: .stamp, withProperties: nil)
+        imageAnnotation.image = image
+        page.addAnnotation(imageAnnotation)
+
+        // Text starts in right column
+        let textX = bounds.minX + imgWidth + 8
+        let textWidth = bounds.width - imgWidth - 10
+        textBounds = CGRect(x: textX, y: bounds.minY, width: textWidth, height: bounds.height)
+    }
+
     let watermarkInfo = """
     Người ký: \(signerName ?? "Unknown")
     Lý do: \(reason)
@@ -953,7 +975,7 @@ private func createSignedPdf(
     \(contact != nil ? "Liên hệ: \(contact!)" : "")
     """
 
-    let watermarkAnnotation = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
+    let watermarkAnnotation = PDFAnnotation(bounds: textBounds, forType: .freeText, withProperties: nil)
     watermarkAnnotation.contents = watermarkInfo
     watermarkAnnotation.color = UIColor.clear
     watermarkAnnotation.font = UIFont.systemFont(ofSize: 12)
@@ -963,20 +985,6 @@ private func createSignedPdf(
     watermarkAnnotation.border?.style = .solid
 
     page.addAnnotation(watermarkAnnotation)
-
-    if let signatureImageData = signatureImageData,
-       let image = UIImage(data: signatureImageData) {
-
-        let imgWidth = signatureImageWidth
-        let imgHeight = signatureImageHeight
-        let imageBounds = CGRect(x: bounds.minX + 5, y: bounds.minY + 5,
-                               width: imgWidth, height: imgHeight)
-
-        let imageAnnotation = ImageAnnotation(bounds: imageBounds, forType: .stamp, withProperties: nil)
-        imageAnnotation.image = image
-
-        page.addAnnotation(imageAnnotation)
-    }
 
     guard let signedPdfData = pdfDocument.dataRepresentation() else {
         throw NSError(domain: "PDFError", code: 3, userInfo: [NSLocalizedDescriptionKey: "Không thể tạo PDF đã ký"])

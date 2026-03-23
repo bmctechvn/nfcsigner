@@ -188,9 +188,9 @@ class _HomePageState extends State<HomePage> {
 
     // 2. Tạo cấu hình chữ ký (có thể lấy ảnh từ assets hoặc file)
     final signatureConfig = PdfSignatureConfig(
-      x: 350.0,           // Vị trí từ trái
+      x: 200.0,           // Vị trí từ trái
       y: 700.0,          // Vị trí từ dưới
-      width: 250.0,      // Chiều rộng
+      width: 300.0,      // Chiều rộng
       height: 80.0,      // Chiều cao
       pageNumber: 1,     // Trang số 1
       contact: 'info@bmctech.vn',

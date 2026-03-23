@@ -149,26 +149,24 @@ class PdfSigningHelper(private val context: Context) {
         var textX = padding
         var textBlockWidth = rect.width - padding * 2
 
-        // Add signature image if available
+        // Add signature image if available (draw on same layer as text for 2-column layout)
         config.signatureImage?.let { imageBytes ->
             try {
                 val imageData = ImageDataFactory.create(imageBytes)
                 appearance.signatureGraphic = imageData
                 appearance.renderingMode = PdfSignatureAppearance.RenderingMode.GRAPHIC_AND_DESCRIPTION
 
-                val n0 = appearance.layer0
-                val canvas0 = com.itextpdf.kernel.pdf.canvas.PdfCanvas(n0, signer.document)
-
+                // Draw image on layer2 (same as text) — left column
                 val imgWidth = config.signatureImageWidth
                 val imgHeight = config.signatureImageHeight
                 val imgX = padding
                 val imgY = (rect.height - imgHeight) / 2f
 
-                canvas0.addImageWithTransformationMatrix(imageData, imgWidth, 0f, 0f, imgHeight, imgX, imgY)
-                canvas0.release()
+                canvas.addImageWithTransformationMatrix(imageData, imgWidth, 0f, 0f, imgHeight, imgX, imgY)
 
-                textX += imgWidth + padding
-                textBlockWidth -= (imgWidth + padding)
+                // Text starts in right column
+                textX = imgWidth + padding * 2
+                textBlockWidth = rect.width - textX - padding
             } catch (e: Exception) {
                 logger.debug("Failed to set signature image: ${e.message}")
                 appearance.renderingMode = PdfSignatureAppearance.RenderingMode.DESCRIPTION

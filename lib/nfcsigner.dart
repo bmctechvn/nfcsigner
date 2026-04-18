@@ -363,4 +363,41 @@ class Nfcsigner {
       );
     }
   }
+
+  /// Giải mã dữ liệu bằng private key trên thẻ thông minh.
+  ///
+  /// **PLACEHOLDER**: Chưa triển khai native APDU decryption.
+  /// Sẽ được implement khi có APDU command cho RSA decryption trên BMC Card.
+  ///
+  /// [appletID] là ID của applet trên thẻ
+  /// [pin] là mã PIN để xác thực
+  /// [encryptedData] là dữ liệu đã mã hoá cần giải mã
+  /// [keyIndex] là chỉ số của khóa giải mã (mặc định 0)
+  static Future<ServiceResult<Uint8List>> decryptData({
+    required String appletID,
+    required String pin,
+    required Uint8List encryptedData,
+    int keyIndex = 0,
+  }) async {
+    try {
+      final Map<String, dynamic> arguments = {
+        'appletID': appletID,
+        'pin': pin,
+        'encryptedData': encryptedData,
+        'keyIndex': keyIndex,
+      };
+
+      final Uint8List? result =
+          await _channel.invokeMethod('decryptData', arguments);
+
+      return ServiceResult.success(result);
+    } on PlatformException catch (e) {
+      return ServiceResult.fromPlatformException(e);
+    } catch (e) {
+      return ServiceResult.failure(
+        status: CardStatus.unknownError,
+        message: 'Lỗi giải mã: $e',
+      );
+    }
+  }
 }

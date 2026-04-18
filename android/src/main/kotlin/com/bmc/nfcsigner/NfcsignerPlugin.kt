@@ -126,6 +126,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       "getCertificate" -> handleGetCertificate(cardManager, call, result)
       "signPdf" -> handleSignPdf(cardManager, call, result)
       "generateXMLSignature" -> handleGenerateXMLSignature(cardManager, call, result)
+      "decryptData" -> handleDecryptData(cardManager, call, result)
       else -> result.notImplemented()
     }
   }
@@ -268,6 +269,35 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
 
     } catch (e: Exception) {
       result.error("COMMUNICATION_ERROR", "Lỗi giao tiếp I/O: ${e.message}", null)
+    }
+  }
+
+  private fun handleDecryptData(cardManager: CardOperationManager, call: MethodCall, result: Result) {
+    try {
+      val appletID = call.argument<String>("appletID")!!
+      val pin = call.argument<String>("pin")!!
+      val encryptedData = call.argument<ByteArray>("encryptedData")!!
+
+      if (!cardManager.selectApplet(hexStringToByteArray(appletID))) {
+        result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", null)
+        return
+      }
+
+      // Verify PIN with mode 82 for decryption
+      val (pinVerified, triesLeft) = cardManager.verifyPinForDecrypt(pin)
+      if (!pinVerified) {
+        val message = if (triesLeft > 0) "Xác thực PIN thất bại. Còn $triesLeft lần thử."
+        else "Xác thực PIN thất bại."
+        result.error("AUTH_ERROR", message, null)
+        return
+      }
+
+      // PSO:DECIPHER with command chaining
+      val decryptedData = cardManager.decryptData(encryptedData)
+      result.success(decryptedData)
+
+    } catch (e: Exception) {
+      result.error("DECRYPT_ERROR", "Lỗi giải mã: ${e.message}", null)
     }
   }
 

@@ -42,6 +42,7 @@ class _HomePageState extends State<HomePage> {
   String _publicKeyHex = '';
   String _certificateHex = '';
   String _signedXmlContent = '';
+  String _decryptResultHex = '';
   String _bytesToHexString(Uint8List bytes) {
     return bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join('');
   }
@@ -498,6 +499,73 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
   }
+
+  /// Demo: Get encryption public key (KeyRole.dec)
+  Future<void> _handleGetEncPublicKey() async {
+    setState(() {
+      _isLoading = true;
+      _clearResults();
+      _statusMessage = 'Đang lấy khóa mã hoá (dec)...';
+    });
+
+    final result = await Nfcsigner.getRsaPublicKey(
+      appletID: 'D27600012401',
+      keyRole: KeyRole.dec,
+    );
+
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _lastResult = result;
+        if (result.isSuccess && result.data != null) {
+          _statusMessage = 'Lấy khóa mã hoá thành công!';
+          _publicKeyHex = _bytesToHexString(result.data as Uint8List);
+        } else {
+          _statusMessage = 'Lỗi: ${result.message}';
+        }
+      });
+    }
+  }
+
+  /// Demo: Decrypt data using S-USB hardware
+  Future<void> _handleDecryptData() async {
+    setState(() {
+      _isLoading = true;
+      _clearResults();
+      _statusMessage = 'Đang giải mã dữ liệu...';
+    });
+
+    // Demo: use a test encrypted data (in real use, this would be actual ciphertext)
+    // For testing, use a 512-byte block (RSA-4096 ciphertext size)
+    final testEncryptedData = Uint8List(512); // All zeros for demo
+    for (int i = 0; i < testEncryptedData.length; i++) {
+      testEncryptedData[i] = i & 0xFF;
+    }
+
+    final result = await Nfcsigner.decryptData(
+      appletID: 'D27600012401',
+      pin: '123456',
+      encryptedData: testEncryptedData,
+    );
+
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _lastResult = result;
+        if (result.isSuccess && result.data != null) {
+          _statusMessage = 'Giải mã thành công! (${result.data!.length} bytes)';
+          _decryptResultHex = _bytesToHexString(result.data as Uint8List);
+        } else {
+          String errorMessage = 'Lỗi giải mã: ${result.message}';
+          if (result.sw1 != null) {
+            final swHex = '${result.sw1!.toRadixString(16)}${result.sw2!.toRadixString(16)}'.toUpperCase();
+            errorMessage += ' (SW: $swHex)';
+          }
+          _statusMessage = errorMessage;
+        }
+      });
+    }
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -575,6 +643,26 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ],
                 ),
+              const SizedBox(height: 12),
+              // NÚT LẤY KHÓA MÃ HOÁ
+              ElevatedButton(
+                onPressed: _handleGetEncPublicKey,
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.indigo,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                child: const Text('Lấy Khóa Mã Hoá (dec)'),
+              ),
+              const SizedBox(height: 12),
+              // NÚT GIẢI MÃ
+              ElevatedButton(
+                onPressed: _handleDecryptData,
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red.shade700,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                child: const Text('Demo Giải Mã (Decrypt)'),
+              ),
               if (_signatureHex.isNotEmpty)
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -654,6 +742,28 @@ class _HomePageState extends State<HomePage> {
                       child: Text(
                         'XML đã được ký thành công! (${_signedXmlContent.length} ký tự)',
                         style: TextStyle(color: Colors.green.shade800),
+                      ),
+                    ),
+                  ],
+                ),
+              // Hiển thị kết quả giải mã (nếu có)
+              if (_decryptResultHex.isNotEmpty)
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 16),
+                    const Text('Kết quả giải mã (Hex):', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        border: Border.all(color: Colors.red.shade200),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: SelectableText(
+                        _decryptResultHex,
+                        style: const TextStyle(fontFamily: 'monospace'),
                       ),
                     ),
                   ],

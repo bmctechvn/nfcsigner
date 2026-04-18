@@ -78,6 +78,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                 self.handleSignPdfViaUsb(call: call, result: result)
             case "generateXMLSignature":
                 self.handleGenerateXMLSignatureViaUsb(call: call, result: result)
+            case "decryptData":
+                self.handleDecryptDataViaUsb(call: call, result: result)
             default:
                 self.usbCardManager.disconnect()
                 result(FlutterMethodNotImplemented)
@@ -350,6 +352,50 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
         }
     }
     
+    private func handleDecryptDataViaUsb(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let arguments = call.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let pin = arguments["pin"] as? String,
+              let encryptedData = arguments["encryptedData"] as? FlutterStandardTypedData else {
+            usbCardManager.disconnect()
+            result(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            return
+        }
+        
+        let aidData = dataWithHexString(hex: appletIDHex)
+        
+        // Step 1: Select Applet
+        usbCardManager.selectApplet(aid: aidData) { [weak self] success, sw1, sw2, error in
+            guard let self = self else { return }
+            
+            if !success {
+                self.usbCardManager.disconnect()
+                result(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                return
+            }
+            
+            // Step 2: Verify PIN (mode 82 for decryption)
+            self.usbCardManager.verifyPinForDecrypt(pin: pin) { success, sw1, sw2, error in
+                if !success {
+                    self.usbCardManager.disconnect()
+                    result(FlutterError(code: "AUTH_ERROR", message: "Xác thực PIN thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    return
+                }
+                
+                // Step 3: PSO:DECIPHER with command chaining
+                self.usbCardManager.decryptData(encryptedData: encryptedData.data) { decryptedData, sw1, sw2, error in
+                    self.usbCardManager.disconnect()
+                    
+                    if let decryptedData = decryptedData {
+                        result(FlutterStandardTypedData(bytes: decryptedData))
+                    } else {
+                        result(FlutterError(code: "DECRYPT_ERROR", message: "Giải mã thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    }
+                }
+            }
+        }
+    }
+    
     // MARK: - NFC Request Handling
     
     private func handleNfcRequest(call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -415,6 +461,8 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
                 self.handleSignPdf(tag: iso7816Tag, session: session)
             } else if self.pendingCall?.method == "generateXMLSignature" {
                 self.handleGenerateXMLSignature(tag: iso7816Tag, session: session)
+            } else if self.pendingCall?.method == "decryptData" {
+                self.handleDecryptData(tag: iso7816Tag, session: session)
             }
             else {
                 session.invalidate(errorMessage: "Lệnh không được hỗ trợ.")
@@ -755,6 +803,111 @@ public class NfcsignerPlugin: NSObject, FlutterPlugin, NFCTagReaderSessionDelega
             }
         }
     }
+
+    private func handleDecryptData(tag: NFCISO7816Tag, session: NFCTagReaderSession) {
+        guard let arguments = self.pendingCall?.arguments as? [String: Any],
+              let appletIDHex = arguments["appletID"] as? String,
+              let pin = arguments["pin"] as? String,
+              let encryptedData = arguments["encryptedData"] as? FlutterStandardTypedData else {
+            session.invalidate(errorMessage: "Tham số không hợp lệ.")
+            self.pendingResult?(FlutterError(code: "INVALID_PARAMETERS", message: "Tham số không hợp lệ.", details: nil))
+            self.cleanup()
+            return
+        }
+
+        let selectAPDU = NFCISO7816APDU(instructionClass: 0x00, instructionCode: 0xA4, p1Parameter: 0x04, p2Parameter: 0x00, data: dataWithHexString(hex: appletIDHex), expectedResponseLength: -1)
+        // VERIFY PIN mode 0x82 for decryption
+        let verifyAPDU = NFCISO7816APDU(instructionClass: 0x00, instructionCode: 0x20, p1Parameter: 0x00, p2Parameter: 0x82, data: Data(pin.utf8), expectedResponseLength: -1)
+
+        // Build decipher data: padding indicator (0x00) + ciphertext
+        var decipherData = Data([0x00])
+        decipherData.append(encryptedData.data)
+
+        sendCommandAndGetResponse(tag: tag, apdu: selectAPDU) { (_, sw1, sw2, error) in
+            guard error == nil, sw1 == 0x90, sw2 == 0x00 else {
+                session.invalidate(errorMessage: "Không thể chọn Applet.")
+                self.pendingResult?(FlutterError(code: "APPLET_NOT_SELECTED", message: "Không thể chọn Applet.", details: ["sw1": sw1, "sw2": sw2]))
+                self.cleanup()
+                return
+            }
+
+            self.sendCommandAndGetResponse(tag: tag, apdu: verifyAPDU) { (_, sw1, sw2, error) in
+                guard error == nil, sw1 == 0x90, sw2 == 0x00 else {
+                    session.invalidate(errorMessage: "Xác thực PIN thất bại.")
+                    self.pendingResult?(FlutterError(code: "AUTH_ERROR", message: "Xác thực PIN thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                    self.cleanup()
+                    return
+                }
+
+                // PSO:DECIPHER with command chaining (RSA-4096: 513 bytes → 3 chunks)
+                self.sendChainedDecipherNfc(tag: tag, data: decipherData, session: session)
+            }
+        }
+    }
+
+    /// Send PSO:DECIPHER via NFC with command chaining
+    ///
+    /// Splits data into 255-byte chunks. Intermediate chunks use CLA=0x10,
+    /// final chunk uses CLA=0x00 with Le=256.
+    private func sendChainedDecipherNfc(tag: NFCISO7816Tag, data: Data, session: NFCTagReaderSession) {
+        let maxChunkSize = 255
+        var chunks: [Data] = []
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + maxChunkSize, data.count)
+            chunks.append(data[offset..<end])
+            offset = end
+        }
+
+        func sendChunk(index: Int) {
+            guard index < chunks.count else {
+                session.invalidate(errorMessage: "Giải mã thất bại.")
+                self.pendingResult?(FlutterError(code: "DECRYPT_ERROR", message: "No chunks to send.", details: nil))
+                self.cleanup()
+                return
+            }
+
+            let chunk = chunks[index]
+            let isLast = (index == chunks.count - 1)
+            let cla: UInt8 = isLast ? 0x00 : 0x10
+            let expectedLen: Int = isLast ? 256 : -1
+
+            let apdu = NFCISO7816APDU(instructionClass: cla, instructionCode: 0x2A, p1Parameter: 0x80, p2Parameter: 0x86, data: chunk, expectedResponseLength: expectedLen)
+
+            if isLast {
+                // Final chunk — expect decrypted data response
+                self.sendCommandAndGetResponse(tag: tag, apdu: apdu) { (responseData, sw1, sw2, error) in
+                    guard error == nil, sw1 == 0x90, sw2 == 0x00 else {
+                        session.invalidate(errorMessage: "Giải mã thất bại.")
+                        self.pendingResult?(FlutterError(code: "DECRYPT_ERROR", message: "Giải mã thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                        self.cleanup()
+                        return
+                    }
+
+                    session.alertMessage = "Giải mã thành công!"
+                    session.invalidate()
+                    self.pendingResult?(FlutterStandardTypedData(bytes: responseData))
+                    self.cleanup()
+                }
+            } else {
+                // Intermediate chunk — expect 9000 acknowledgment
+                self.sendCommandAndGetResponse(tag: tag, apdu: apdu) { (_, sw1, sw2, error) in
+                    guard error == nil, sw1 == 0x90, sw2 == 0x00 else {
+                        session.invalidate(errorMessage: "Giải mã thất bại (command chaining).")
+                        self.pendingResult?(FlutterError(code: "DECRYPT_ERROR", message: "Command chaining thất bại.", details: ["sw1": sw1, "sw2": sw2]))
+                        self.cleanup()
+                        return
+                    }
+
+                    // Send next chunk
+                    sendChunk(index: index + 1)
+                }
+            }
+        }
+
+        sendChunk(index: 0)
+    }
+
     private func getCertificateFromCard(tag: NFCISO7816Tag, completion: @escaping (Data?) -> Void) {
         let keyRole = "sig"
 

@@ -186,9 +186,21 @@ class UsbCardManager: NSObject {
     /// FW handles 61xx GET RESPONSE internally, returns complete card response in chunks
     private func transmitViaTunnel(card: TKSmartCard, apdu: Data, completion: @escaping (Data, UInt8, UInt8, Error?) -> Void) {
         // P2=0x00: execute APDU, get first chunk
-        var tunnelApdu = Data([UsbCardManager.tunnelCLA, UsbCardManager.tunnelINS, 0x00, 0x00, UInt8(apdu.count)])
+        var tunnelApdu = Data([UsbCardManager.tunnelCLA, UsbCardManager.tunnelINS, 0x00, 0x00])
+        
+        // Encode Lc: use extended length (3-byte) if apdu > 255 bytes (e.g., RSA-4096)
+        if apdu.count > 255 {
+            // Extended length: 0x00 + 2-byte big-endian length
+            tunnelApdu.append(0x00)
+            tunnelApdu.append(UInt8((apdu.count >> 8) & 0xFF))
+            tunnelApdu.append(UInt8(apdu.count & 0xFF))
+        } else {
+            // Short length: 1 byte
+            tunnelApdu.append(UInt8(apdu.count))
+        }
+        
         tunnelApdu.append(apdu)
-        logger.debug("Tunnel TX: \(tunnelApdu.hexString)")
+        logger.debug("Tunnel TX: \(tunnelApdu.hexString) (\(apdu.count) bytes payload)")
         
         card.transmit(tunnelApdu) { [weak self] response, error in
             guard let self = self else { return }
@@ -422,6 +434,208 @@ class UsbCardManager: NSObject {
                 } else {
                     completion(nil, sw1, sw2, error)
                 }
+            }
+        }
+    }
+    
+    /// Verify PIN for decryption operations (PW1 mode 82)
+    ///
+    /// OpenPGP spec requires mode 0x82 for PSO:DECIPHER and INTERNAL AUTHENTICATE,
+    /// distinct from mode 0x81 used for PSO:CDS (signing).
+    func verifyPinForDecrypt(pin: String, completion: @escaping (Bool, UInt8, UInt8, Error?) -> Void) {
+        // VERIFY APDU: 00 20 00 82 [Lc] [PIN]
+        let pinData = Data(pin.utf8)
+        var apdu = Data([0x00, 0x20, 0x00, 0x82, UInt8(pinData.count)])
+        apdu.append(pinData)
+        
+        transmitApduWithGetResponse(apdu) { _, sw1, sw2, error in
+            let success = (error == nil && sw1 == 0x90 && sw2 == 0x00)
+            completion(success, sw1, sw2, error)
+        }
+    }
+    
+    /// Decrypt data using PSO:DECIPHER with command chaining
+    ///
+    /// Sends a PSO:DECIPHER (INS=2A, P1=80, P2=86) command to the smart card.
+    /// Prepends padding indicator byte 0x00 (PKCS#1 v1.5) to the ciphertext.
+    /// For RSA-4096: total = 1 + 512 = 513 bytes → 3 chained APDUs (255+255+3).
+    ///
+    /// - Parameters:
+    ///   - encryptedData: The RSA ciphertext to decrypt (e.g. 512 bytes for RSA-4096)
+    ///   - completion: Callback with (decryptedData, sw1, sw2, error)
+    func decryptData(encryptedData: Data, completion: @escaping (Data?, UInt8, UInt8, Error?) -> Void) {
+        // Prepend padding indicator byte
+        var fullData = Data([0x00])
+        fullData.append(encryptedData)
+        
+        logger.debug("PSO:DECIPHER total data: \(fullData.count) bytes, composite=\(isCompositeDevice)")
+        
+        // Split into chunks of max 255 bytes for command chaining
+        let maxChunkSize = 255
+        var chunks: [Data] = []
+        var offset = 0
+        while offset < fullData.count {
+            let end = min(offset + maxChunkSize, fullData.count)
+            chunks.append(fullData[offset..<end])
+            offset = end
+        }
+        
+        logger.debug("PSO:DECIPHER split into \(chunks.count) chunks")
+        
+        if isCompositeDevice {
+            // Composite device: the tunnel FW doesn't maintain command chaining state
+            // across separate tunnel invocations. Send chained APDUs directly to
+            // TKSmartCard (bypassing the tunnel) for PSO:DECIPHER.
+            sendChainedDecipherDirect(chunks: chunks, chunkIndex: 0, completion: completion)
+        } else {
+            sendChainedDecipher(chunks: chunks, chunkIndex: 0, completion: completion)
+        }
+    }
+    
+    /// Send chained PSO:DECIPHER directly to TKSmartCard (bypassing CCID tunnel).
+    /// Used for composite devices where the tunnel can't handle command chaining.
+    private func sendChainedDecipherDirect(chunks: [Data], chunkIndex: Int, completion: @escaping (Data?, UInt8, UInt8, Error?) -> Void) {
+        guard let card = currentCard, chunkIndex < chunks.count else {
+            completion(nil, 0, 0, NSError(domain: "UsbCardManager", code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "No card or chunks"]))
+            return
+        }
+        
+        let chunk = chunks[chunkIndex]
+        let isLast = (chunkIndex == chunks.count - 1)
+        let cla: UInt8 = isLast ? 0x00 : 0x10
+        
+        var apdu = Data([cla, 0x2A, 0x80, 0x86, UInt8(chunk.count)])
+        apdu.append(chunk)
+        if isLast {
+            apdu.append(0x00) // Le = 256
+        }
+        
+        logger.debug("PSO:DECIPHER direct chunk \(chunkIndex+1)/\(chunks.count): CLA=\(String(format: "%02X", cla)), \(chunk.count) bytes")
+        
+        card.transmit(apdu) { [weak self] response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                self.logger.debug("Direct transmit error: \(error.localizedDescription)")
+                completion(nil, 0, 0, error)
+                return
+            }
+            
+            guard let response = response, response.count >= 2 else {
+                completion(nil, 0, 0, NSError(domain: "UsbCardManager", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Response too short"]))
+                return
+            }
+            
+            let sw1 = response[response.count - 2]
+            let sw2 = response[response.count - 1]
+            let data = Data(response.dropLast(2))
+            
+            self.logger.debug("PSO:DECIPHER direct RX: SW=\(String(format: "%02X%02X", sw1, sw2)), data=\(data.count) bytes")
+            
+            if !isLast {
+                // Intermediate chunk — expect 9000
+                if sw1 == 0x90 && sw2 == 0x00 {
+                    self.sendChainedDecipherDirect(chunks: chunks, chunkIndex: chunkIndex + 1, completion: completion)
+                } else {
+                    completion(nil, sw1, sw2, NSError(domain: "UsbCardManager", code: 6,
+                        userInfo: [NSLocalizedDescriptionKey: "Command chaining failed at chunk \(chunkIndex+1)"]))
+                }
+            } else {
+                // Last chunk — handle response
+                if sw1 == 0x90 && sw2 == 0x00 {
+                    completion(data, sw1, sw2, nil)
+                } else if sw1 == 0x61 {
+                    // More data available — send GET RESPONSE commands
+                    self.accumulateGetResponse(card: card, accumulated: data, remaining: Int(sw2), completion: completion)
+                } else {
+                    completion(nil, sw1, sw2, nil)
+                }
+            }
+        }
+    }
+    
+    /// Accumulate GET RESPONSE data for direct transmit mode
+    private func accumulateGetResponse(card: TKSmartCard, accumulated: Data, remaining: Int, completion: @escaping (Data?, UInt8, UInt8, Error?) -> Void) {
+        let le: UInt8 = remaining > 0 ? UInt8(min(remaining, 256) & 0xFF) : 0x00
+        let getResp = Data([0x00, 0xC0, 0x00, 0x00, le])
+        
+        card.transmit(getResp) { [weak self] response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                completion(nil, 0, 0, error)
+                return
+            }
+            
+            guard let response = response, response.count >= 2 else {
+                completion(nil, 0, 0, NSError(domain: "UsbCardManager", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "GET RESPONSE too short"]))
+                return
+            }
+            
+            let sw1 = response[response.count - 2]
+            let sw2 = response[response.count - 1]
+            let data = Data(response.dropLast(2))
+            var total = accumulated
+            total.append(data)
+            
+            self.logger.debug("GET RESPONSE: \(data.count) bytes, SW=\(String(format: "%02X%02X", sw1, sw2)), total=\(total.count)")
+            
+            if sw1 == 0x61 {
+                // More data
+                self.accumulateGetResponse(card: card, accumulated: total, remaining: Int(sw2), completion: completion)
+            } else {
+                completion(total, sw1, sw2, nil)
+            }
+        }
+    }
+    
+    /// Send chained PSO:DECIPHER APDUs recursively via tunnel (for non-composite mode)
+    ///
+    /// CLA=0x10 for intermediate chunks, CLA=0x00 for the final chunk.
+    /// Le=0x00 appended only on the final chunk.
+    private func sendChainedDecipher(chunks: [Data], chunkIndex: Int, completion: @escaping (Data?, UInt8, UInt8, Error?) -> Void) {
+        guard chunkIndex < chunks.count else {
+            completion(nil, 0, 0, NSError(domain: "UsbCardManager", code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "No chunks to send"]))
+            return
+        }
+        
+        let chunk = chunks[chunkIndex]
+        let isLast = (chunkIndex == chunks.count - 1)
+        let cla: UInt8 = isLast ? 0x00 : 0x10
+        
+        // Build APDU: [CLA] 2A 80 86 [Lc] [data] [Le if last]
+        var apdu = Data([cla, 0x2A, 0x80, 0x86, UInt8(chunk.count)])
+        apdu.append(chunk)
+        if isLast {
+            apdu.append(0x00) // Le = 256
+        }
+        
+        logger.debug("PSO:DECIPHER chunk \(chunkIndex+1)/\(chunks.count): CLA=\(String(format: "%02X", cla)), \(chunk.count) bytes")
+        
+        if isLast {
+            transmitApduWithGetResponse(apdu) { responseData, sw1, sw2, error in
+                if error == nil && sw1 == 0x90 && sw2 == 0x00 {
+                    completion(responseData, sw1, sw2, nil)
+                } else {
+                    completion(nil, sw1, sw2, error)
+                }
+            }
+        } else {
+            transmitApdu(apdu) { [weak self] _, sw1, sw2, error in
+                guard let self = self else { return }
+                
+                if error != nil || sw1 != 0x90 || sw2 != 0x00 {
+                    self.logger.debug("PSO:DECIPHER chain failed at chunk \(chunkIndex+1): SW=\(String(format: "%02X%02X", sw1, sw2))")
+                    completion(nil, sw1, sw2, error ?? NSError(domain: "UsbCardManager", code: 6,
+                        userInfo: [NSLocalizedDescriptionKey: "Command chaining failed at chunk \(chunkIndex+1)"]))
+                    return
+                }
+                
+                self.sendChainedDecipher(chunks: chunks, chunkIndex: chunkIndex + 1, completion: completion)
             }
         }
     }

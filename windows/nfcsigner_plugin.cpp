@@ -149,6 +149,15 @@ void NfcsignerPlugin::HandleMethodCall(
         HandleGetCertificate(args, std::move(result));
     } else if (method_call.method_name().compare("signPdf") == 0) {
         HandleSignPdf(args, std::move(result));
+    } else if (method_call.method_name().compare("decryptData") == 0) {
+        HandleDecryptData(args, std::move(result));
+    } else if (method_call.method_name().compare("getPlatformVersion") == 0) {
+        std::ostringstream version_stream;
+        version_stream << "Windows ";
+        if (IsWindows10OrGreater()) version_stream << "10+";
+        else if (IsWindows8OrGreater()) version_stream << "8";
+        else version_stream << "(unknown)";
+        result->Success(flutter::EncodableValue(version_stream.str()));
     } else {
     result->NotImplemented();
   }
@@ -176,7 +185,8 @@ void NfcsignerPlugin::HandleMethodCall(
             SCardFreeMemory(hContext, mszReaders);
             if (lReturn != SCARD_S_SUCCESS) throw std::runtime_error("SCardConnect failed. Is a card inserted?");
 
-            operation(hCard);
+            std::cout << "[CardOperation] Connected with protocol: " << (dwActiveProtocol == SCARD_PROTOCOL_T0 ? "T0" : "T1") << std::endl;
+            operation(hCard, dwActiveProtocol);
 
         } catch (const std::runtime_error& e) {
             result->Error("PC/SC_ERROR", e.what());
@@ -187,18 +197,19 @@ void NfcsignerPlugin::HandleMethodCall(
     }
 
 // APDU Transmit function with GET RESPONSE handling
-    std::vector<uint8_t> NfcsignerPlugin::TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command) {
+    std::vector<uint8_t> NfcsignerPlugin::TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command, DWORD dwActiveProtocol) {
 
-        //const SCARD_IO_REQUEST* pci;
+        const SCARD_IO_REQUEST* pci = (dwActiveProtocol == SCARD_PROTOCOL_T0) ? SCARD_PCI_T0 : SCARD_PCI_T1;
 
-        std::vector<uint8_t> response_buffer(260, 0); // 256 data + 2 status words
-        DWORD response_len = 260;
+        const DWORD BUFFER_SIZE = 4096;
+        std::vector<uint8_t> response_buffer(BUFFER_SIZE, 0);
+        DWORD response_len = BUFFER_SIZE;
 
-        // Sử dụng SCARD_PCI_T1 nếu protocol là T1, ngược lại là T0
-        // Trong ví dụ này, ta giả định T0 hoặc để Windows tự chọn. Dùng SCARD_PCI_T0 là phổ biến.
-        LONG lReturn = SCardTransmit(hCard, SCARD_PCI_T1, command.data(), (DWORD)command.size(), NULL, response_buffer.data(), &response_len);
+        LONG lReturn = SCardTransmit(hCard, pci, command.data(), (DWORD)command.size(), NULL, response_buffer.data(), &response_len);
         if (lReturn != SCARD_S_SUCCESS) {
-            throw std::runtime_error("Lỗi SCardTransmit.");
+            std::ostringstream oss;
+            oss << "SCardTransmit failed (0x" << std::hex << lReturn << ")";
+            throw std::runtime_error(oss.str());
         }
         response_buffer.resize(response_len);
 
@@ -212,12 +223,12 @@ void NfcsignerPlugin::HandleMethodCall(
                 uint8_t le = response_buffer[response_len - 1];
                 std::vector<uint8_t> get_response_cmd = { 0x00, 0xC0, 0x00, 0x00, le };
 
-                response_len = 260;
-                response_buffer.assign(260, 0);
+                response_len = BUFFER_SIZE;
+                response_buffer.assign(BUFFER_SIZE, 0);
 
-                lReturn = SCardTransmit(hCard, SCARD_PCI_T1, get_response_cmd.data(), (DWORD)get_response_cmd.size(), NULL, response_buffer.data(), &response_len);
+                lReturn = SCardTransmit(hCard, pci, get_response_cmd.data(), (DWORD)get_response_cmd.size(), NULL, response_buffer.data(), &response_len);
                 if (lReturn != SCARD_S_SUCCESS) {
-                    throw std::runtime_error("Lỗi SCardTransmit khi GET RESPONSE.");
+                    throw std::runtime_error("SCardTransmit failed during GET RESPONSE.");
                 }
                 response_buffer.resize(response_len);
 
@@ -234,7 +245,7 @@ void NfcsignerPlugin::HandleMethodCall(
     }
     void NfcsignerPlugin::HandleSign(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         auto p_result = result.release();
-        CardOperation([this, args, p_result](SCARDHANDLE hCard) {
+        CardOperation([this, args, p_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
             // Lấy tham số
             auto appletID = std::get<std::string>(args->at(flutter::EncodableValue("appletID")));
             auto pin = std::get<std::string>(args->at(flutter::EncodableValue("pin")));
@@ -242,17 +253,17 @@ void NfcsignerPlugin::HandleMethodCall(
             auto keyIndex = std::get<int>(args->at(flutter::EncodableValue("keyIndex")));
 
             // Chuỗi lệnh APDU
-            auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID));
+            auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID), dwActiveProtocol);
             if (select_resp.back() != 0x00 || select_resp[select_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Chọn Applet thất bại.");
             }
 
-            auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin));
+            auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin), dwActiveProtocol);
             if (verify_resp.back() != 0x00 || verify_resp[verify_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Xác thực PIN thất bại.");
             }
 
-            auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(dataToSign, keyIndex));
+            auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(dataToSign, keyIndex), dwActiveProtocol);
             if (sign_resp.back() != 0x00 || sign_resp[sign_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Ký số thất bại.");
             }
@@ -265,7 +276,7 @@ void NfcsignerPlugin::HandleMethodCall(
     // Handler for getRsaPublicKey
     void NfcsignerPlugin::HandleGetPublicKey(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         auto p_result = result.release();
-        CardOperation([this, args, p_result](SCARDHANDLE hCard) {
+        CardOperation([this, args, p_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
             // Extract args
             auto appletID = std::get<std::string>(args->at(flutter::EncodableValue("appletID")));
             auto keyRole = std::get<std::string>(args->at(flutter::EncodableValue("keyRole")));
@@ -275,12 +286,12 @@ void NfcsignerPlugin::HandleMethodCall(
             auto get_key_cmd = CreateGetRsaPublicKeyCommand(keyRole);
 
             // Transmit sequence
-            auto select_resp = TransmitAndGetResponse(hCard, select_cmd);
+            auto select_resp = TransmitAndGetResponse(hCard, select_cmd, dwActiveProtocol);
             if (select_resp.size() < 2 || select_resp[select_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Select Applet failed.");
             }
 
-            auto key_resp = TransmitAndGetResponse(hCard, get_key_cmd);
+            auto key_resp = TransmitAndGetResponse(hCard, get_key_cmd, dwActiveProtocol);
             if (key_resp.size() < 2 || key_resp[key_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Get Public Key failed.");
             }
@@ -293,22 +304,22 @@ void NfcsignerPlugin::HandleMethodCall(
     }
     void NfcsignerPlugin::HandleGetCertificate(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         auto p_result = result.release();
-        CardOperation([this, args, p_result](SCARDHANDLE hCard) {
+        CardOperation([this, args, p_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
             // Lấy tham số
             auto appletID = std::get<std::string>(args->at(flutter::EncodableValue("appletID")));
 
             // Chuỗi lệnh APDU
-            auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID));
+            auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID), dwActiveProtocol);
             if (select_resp.back() != 0x00 || select_resp[select_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Chọn Applet thất bại.");
             }
 
-            auto select_cert_resp = TransmitAndGetResponse(hCard, CreateSelectCertificateCommand());
+            auto select_cert_resp = TransmitAndGetResponse(hCard, CreateSelectCertificateCommand(), dwActiveProtocol);
             if (select_cert_resp.back() != 0x00 || select_cert_resp[select_cert_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Chọn dữ liệu Certificate thất bại.");
             }
 
-            auto cert_resp = TransmitAndGetResponse(hCard, CreateGetCertificateCommand());
+            auto cert_resp = TransmitAndGetResponse(hCard, CreateGetCertificateCommand(), dwActiveProtocol);
             if (cert_resp.back() != 0x00 || cert_resp[cert_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Lấy Certificate thất bại.");
             }
@@ -322,7 +333,7 @@ void NfcsignerPlugin::HandleMethodCall(
 
         auto p_result = result.release();
 
-        CardOperation([this, args, p_result](SCARDHANDLE hCard) {
+        CardOperation([this, args, p_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
             try {
                 // 1. Lấy tất cả tham số từ Flutter
                 std::cout << "=== Starting PDF Signing Process ===" << std::endl;
@@ -338,7 +349,12 @@ void NfcsignerPlugin::HandleMethodCall(
                 auto keyIndex = std::get<int>(args->at(flutter::EncodableValue("keyIndex")));
                 auto reason = std::get<std::string>(args->at(flutter::EncodableValue("reason")));
                 auto location = std::get<std::string>(args->at(flutter::EncodableValue("location")));
-                auto signatureLength = std::get<int>(args->at(flutter::EncodableValue("signatureLength")));
+                // signatureLength may not be sent from Dart; default to 512 (RSA 4096)
+                int signatureLength = 512;
+                auto sigLen_iter = args->find(flutter::EncodableValue("signatureLength"));
+                if (sigLen_iter != args->end()) {
+                    signatureLength = std::get<int>(sigLen_iter->second);
+                }
 
                 // Lấy DigestInfo bạn đã cung cấp
                 auto data_to_send_to_card = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("pdfHashBytes")));
@@ -385,18 +401,18 @@ void NfcsignerPlugin::HandleMethodCall(
                 // 2. Giao tiếp với thẻ để lấy Certificate
                 // Việc ký sẽ được thực hiện sau bên trong callback của PoDoFo
                 std::cout << "Selecting applet..." << std::endl;
-                auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID));
+                auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID), dwActiveProtocol);
                 if (select_resp.size() < 2 || select_resp[select_resp.size() - 2] != 0x90) throw std::runtime_error("Select Applet failed.");
 
                 std::cout << "Verifying PIN..." << std::endl;
-                auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin));
+                auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin), dwActiveProtocol);
                 if (verify_resp.size() < 2 || verify_resp[verify_resp.size() - 2] != 0x90) throw std::runtime_error("Verify PIN failed.");
 
                 std::cout << "Selecting certificate..." << std::endl;
-                auto select_cert_resp = TransmitAndGetResponse(hCard, CreateSelectCertificateCommand());
+                auto select_cert_resp = TransmitAndGetResponse(hCard, CreateSelectCertificateCommand(), dwActiveProtocol);
                 if (select_cert_resp.size() < 2 || select_cert_resp[select_cert_resp.size() - 2] != 0x90) throw std::runtime_error("Select Certificate data object failed.");
 
-                auto cert_resp = TransmitAndGetResponse(hCard, CreateGetCertificateCommand());
+                auto cert_resp = TransmitAndGetResponse(hCard, CreateGetCertificateCommand(), dwActiveProtocol);
                 if (cert_resp.size() < 2 || cert_resp[cert_resp.size() - 2] != 0x90) throw std::runtime_error("Get Certificate failed.");
                 std::vector<uint8_t> certificate_data(cert_resp.begin(), cert_resp.end() - 2);
                 if (certificate_data.empty()) throw std::runtime_error("Certificate from card is empty.");
@@ -511,22 +527,8 @@ void NfcsignerPlugin::HandleMethodCall(
                         return;
                     }
 
-                    // Lần 2: Lấy chữ ký thật và điền vào bộ đệm đã được cấp phát sẵn.
-                    // 1. Lấy dữ liệu PoDoFo cung cấp và tính hash SHA-256
-                    /*
-                    std::vector<uint8_t> digest(SHA256_DIGEST_LENGTH);
-                    SHA256(reinterpret_cast<const unsigned char*>(hashToSign.data()), hashToSign.size(), digest.data());
-
-                    // 2. Tạo cấu trúc DigestInfo (định danh SHA256 + hash) để gửi cho thẻ
-                    const std::vector<uint8_t> digestInfoPrefix = {
-                            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
-                            0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
-                    };
-                    std::vector<uint8_t> data_to_send_to_card = digestInfoPrefix;
-                    data_to_send_to_card.insert(data_to_send_to_card.end(), digest.begin(), digest.end());
-                    */
                     std::cout << "Real run: Getting signature from card..." << std::endl;
-                    auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(data_to_send_to_card, keyIndex));
+                    auto sign_resp = TransmitAndGetResponse(hCard, CreateComputeSignatureCommand(data_to_send_to_card, keyIndex), dwActiveProtocol);
                     if (sign_resp.size() < 2 || sign_resp[sign_resp.size() - 2] != 0x90) {
                         throw std::runtime_error("Compute signature failed on card inside callback.");
                     }
@@ -578,6 +580,44 @@ void NfcsignerPlugin::HandleMethodCall(
                 std::cerr << error_msg << std::endl;
                 p_result->Error("UNKNOWN_ERROR", error_msg);
             }
+        }, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>(p_result));
+    }
+
+    // APDU command for PSO:DECIPHER
+    std::vector<uint8_t> CreateDecipherCommand(const std::vector<uint8_t>& data) {
+        // PSO:DECIPHER: CLA=00, INS=2A, P1=80, P2=86
+        // Padding indicator byte (0x00) prepended to data
+        std::vector<uint8_t> cmd = { 0x00, 0x2A, 0x80, 0x86, (uint8_t)(data.size() + 1), 0x00 };
+        cmd.insert(cmd.end(), data.begin(), data.end());
+        cmd.push_back(0x00);
+        return cmd;
+    }
+
+    void NfcsignerPlugin::HandleDecryptData(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        auto p_result = result.release();
+        CardOperation([this, args, p_result](SCARDHANDLE hCard, DWORD dwActiveProtocol) {
+            auto appletID = std::get<std::string>(args->at(flutter::EncodableValue("appletID")));
+            auto pin = std::get<std::string>(args->at(flutter::EncodableValue("pin")));
+            auto encryptedData = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("encryptedData")));
+
+            auto select_resp = TransmitAndGetResponse(hCard, CreateSelectAppletCommand(appletID), dwActiveProtocol);
+            if (select_resp.size() < 2 || select_resp[select_resp.size() - 2] != 0x90) {
+                throw std::runtime_error("Select Applet failed.");
+            }
+
+            auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin), dwActiveProtocol);
+            if (verify_resp.size() < 2 || verify_resp[verify_resp.size() - 2] != 0x90) {
+                throw std::runtime_error("Verify PIN failed.");
+            }
+
+            auto decrypt_resp = TransmitAndGetResponse(hCard, CreateDecipherCommand(encryptedData), dwActiveProtocol);
+            if (decrypt_resp.size() < 2 || decrypt_resp[decrypt_resp.size() - 2] != 0x90) {
+                throw std::runtime_error("Decryption failed.");
+            }
+
+            std::vector<uint8_t> decrypted_data(decrypt_resp.begin(), decrypt_resp.end() - 2);
+            p_result->Success(flutter::EncodableValue(decrypted_data));
+
         }, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>(p_result));
     }
 }  // namespace nfcsigner

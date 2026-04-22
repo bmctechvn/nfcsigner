@@ -27,14 +27,17 @@ list(APPEND PLUGIN_SOURCES
 
 # --- TÌM KIẾM CÁC THƯ VIỆN ĐÃ CÀI ĐẶT QUA VCPKG ---
 set(HAVE_PODOFO TRUE)
-set(PODOFO_INCLUDE_DIR "D:/Projects/Software/Library/vcpkg/installed/x64-windows/include/")
-set(PODOFO_LIBRARY "D:/Projects/Software/Library/vcpkg/installed/x64-windows/lib/podofo.lib")
+set(VCPKG_INSTALLED_DIR "${VCPKG_ROOT}/installed/x64-windows")
+set(PODOFO_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/include/")
+set(PODOFO_LIBRARY "${VCPKG_INSTALLED_DIR}/lib/podofo.lib")
+set(PODOFO_DLL "${VCPKG_INSTALLED_DIR}/bin/podofo.dll")
 if(EXISTS "${PODOFO_INCLUDE_DIR}/podofo/podofo.h" AND EXISTS "${PODOFO_LIBRARY}")
     message(STATUS "Found podofo directly")
-    # Tạo target thủ công
-    add_library(podofo STATIC IMPORTED)
+    # Tạo target thủ công - SHARED vì podofo.dll là dynamic library
+    add_library(podofo SHARED IMPORTED)
     set_target_properties(podofo PROPERTIES
-            IMPORTED_LOCATION "${PODOFO_LIBRARY}"
+            IMPORTED_IMPLIB "${PODOFO_LIBRARY}"
+            IMPORTED_LOCATION "${PODOFO_DLL}"
             INTERFACE_INCLUDE_DIRECTORIES "${PODOFO_INCLUDE_DIR}"
     )
 else()
@@ -93,8 +96,25 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
 # external build triggered from this build file.
+set(VCPKG_BIN_DIR "${VCPKG_INSTALLED_DIR}/bin")
 set(nfcsigner_bundled_libraries
-  ""
+  "${VCPKG_BIN_DIR}/podofo.dll"
+  "${VCPKG_BIN_DIR}/libcrypto-3-x64.dll"
+  "${VCPKG_BIN_DIR}/libssl-3-x64.dll"
+  "${VCPKG_BIN_DIR}/freetype.dll"
+  "${VCPKG_BIN_DIR}/zlib1.dll"
+  "${VCPKG_BIN_DIR}/libpng16.dll"
+  "${VCPKG_BIN_DIR}/bz2.dll"
+  "${VCPKG_BIN_DIR}/brotlidec.dll"
+  "${VCPKG_BIN_DIR}/brotlicommon.dll"
+  "${VCPKG_BIN_DIR}/liblzma.dll"
+  "${VCPKG_BIN_DIR}/jpeg62.dll"
+  "${VCPKG_BIN_DIR}/tiff.dll"
+  "${VCPKG_BIN_DIR}/iconv-2.dll"
+  "${VCPKG_BIN_DIR}/charset-1.dll"
+  "${VCPKG_BIN_DIR}/libxml2.dll"
+  "${VCPKG_BIN_DIR}/fmt.dll"
+  "${VCPKG_BIN_DIR}/utf8proc.dll"
   PARENT_SCOPE
 )
 

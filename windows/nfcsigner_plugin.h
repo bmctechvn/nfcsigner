@@ -18,7 +18,7 @@ class NfcsignerPlugin : public flutter::Plugin {
 
   virtual ~NfcsignerPlugin();
     // Thêm các method public để NfcPdfSigner có thể gọi
-    std::vector<uint8_t> TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command);
+    std::vector<uint8_t> TransmitAndGetResponse(SCARDHANDLE hCard, const std::vector<uint8_t>& command, DWORD dwActiveProtocol = SCARD_PROTOCOL_T1);
   // Disallow copy and assign.
   NfcsignerPlugin(const NfcsignerPlugin&) = delete;
   NfcsignerPlugin& operator=(const NfcsignerPlugin&) = delete;
@@ -32,6 +32,7 @@ class NfcsignerPlugin : public flutter::Plugin {
     void HandleGetPublicKey(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
     void HandleGetCertificate(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
     void HandleSignPdf(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+    void HandleDecryptData(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
     };
     std::vector<uint8_t> CreateComputeSignatureCommand(const std::vector<uint8_t>& data, int keyIndex);
 

@@ -22,6 +22,9 @@ class UsbDeviceManager(private val context: Context) {
     private var permissionCallback: ((Boolean) -> Unit)? = null
     private val usbPermissionAction = "com.bmc.nfcsigner.USB_PERMISSION"
 
+    // Track which device the current connection was opened for
+    private var connectedDeviceName: String? = null
+
     // Track additionally claimed interfaces (for composite device isolation)
     private val claimedInterfaces = mutableListOf<UsbInterface>()
 
@@ -35,19 +38,30 @@ class UsbDeviceManager(private val context: Context) {
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (usbPermissionAction == intent.action) {
-                synchronized(this) {
+            when (intent.action) {
+                usbPermissionAction -> {
+                    synchronized(this) {
+                        val device: UsbDevice? =
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                        val granted =
+                            intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                        if (granted && device != null) {
+                            usbDevice = device
+                            permissionCallback?.invoke(true)
+                        } else {
+                            logger.debug("USB permission denied or device not found")
+                            permissionCallback?.invoke(false)
+                        }
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device: UsbDevice? =
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    val granted =
-                        intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    if (granted && device != null) {
-                        usbDevice = device
-                        permissionCallback?.invoke(true)
-                    } else {
-                        logger.debug("USB permission denied or device not found")
-                        permissionCallback?.invoke(false)
-                    }
+                    logger.debug("USB device detached: ${device?.deviceName}")
+                    // Release stale connection when device is physically unplugged
+                    forceRelease()
+                    usbDevice = null
+                    logger.debug("USB resources released after detach")
                 }
             }
         }
@@ -56,6 +70,7 @@ class UsbDeviceManager(private val context: Context) {
     init {
         try {
             val filter = IntentFilter(usbPermissionAction)
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 // Android 13+ requires RECEIVER_NOT_EXPORTED flag
                 ContextCompat.registerReceiver(
@@ -64,7 +79,7 @@ class UsbDeviceManager(private val context: Context) {
             } else {
                 context.registerReceiver(usbReceiver, filter)
             }
-            logger.debug("USB permission receiver registered")
+            logger.debug("USB permission receiver registered (with detach listener)")
         } catch (e: Exception) {
             logger.debug("Failed to register USB receiver: ${e.message}")
         }
@@ -132,13 +147,13 @@ class UsbDeviceManager(private val context: Context) {
             if (usbConnection != null && usbInterface != null &&
                 endpointIn != null && endpointOut != null) {
 
-                // Kiểm tra connection còn hoạt động không
-                if (usbManager.hasPermission(device)) {
-                    logger.debug("Reusing existing USB connection")
+                // Kiểm tra connection còn hoạt động và cùng device không
+                if (connectedDeviceName == device.deviceName && usbManager.hasPermission(device)) {
+                    logger.debug("Reusing existing USB connection for ${device.deviceName}")
                     return true
                 } else {
-                    // Connection cũ không hợp lệ → cleanup và connect lại
-                    logger.debug("Existing connection stale, reconnecting...")
+                    // Connection cũ không hợp lệ hoặc device khác → cleanup và connect lại
+                    logger.debug("Existing connection stale (connected=${connectedDeviceName}, current=${device.deviceName}), reconnecting...")
                     forceRelease()
                 }
             }
@@ -229,6 +244,9 @@ class UsbDeviceManager(private val context: Context) {
             }
 
             logger.debug("Successfully connected to USB reader")
+
+            // Track which device this connection belongs to
+            connectedDeviceName = device.deviceName
 
             // Đọc CCID descriptor để xác định exchange level và max message length
             readCcidDescriptor()
@@ -371,6 +389,7 @@ class UsbDeviceManager(private val context: Context) {
         usbInterface = null
         endpointIn = null
         endpointOut = null
+        connectedDeviceName = null
     }
 
     fun cleanup() {

@@ -583,7 +583,7 @@ void NfcsignerPlugin::HandleMethodCall(
         }, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>(p_result));
     }
 
-    // APDU command for PSO:DECIPHER
+    // APDU command for PSO:DECIPHER — single short APDU (data ≤ 254 bytes only)
     std::vector<uint8_t> CreateDecipherCommand(const std::vector<uint8_t>& data) {
         // PSO:DECIPHER: CLA=00, INS=2A, P1=80, P2=86
         // Padding indicator byte (0x00) prepended to data
@@ -591,6 +591,73 @@ void NfcsignerPlugin::HandleMethodCall(
         cmd.insert(cmd.end(), data.begin(), data.end());
         cmd.push_back(0x00);
         return cmd;
+    }
+
+    /// Send PSO:DECIPHER with command chaining for large payloads (RSA-2048/4096).
+    ///
+    /// OpenPGP smart cards limit short APDU Lc to 255 bytes.
+    /// RSA-4096 ciphertext = 512 bytes + 1 padding indicator = 513 bytes → 3 chunks.
+    /// Intermediate chunks use CLA=0x10, final chunk uses CLA=0x00.
+    std::vector<uint8_t> NfcsignerPlugin::SendChainedDecipher(SCARDHANDLE hCard, const std::vector<uint8_t>& encryptedData, DWORD dwActiveProtocol) {
+        // Prepend padding indicator byte (0x00) as required by OpenPGP PSO:DECIPHER
+        std::vector<uint8_t> fullData;
+        fullData.reserve(1 + encryptedData.size());
+        fullData.push_back(0x00);
+        fullData.insert(fullData.end(), encryptedData.begin(), encryptedData.end());
+
+        const size_t maxChunkSize = 255;
+        std::vector<std::vector<uint8_t>> chunks;
+        for (size_t offset = 0; offset < fullData.size(); offset += maxChunkSize) {
+            size_t end = std::min(offset + maxChunkSize, fullData.size());
+            chunks.emplace_back(fullData.begin() + offset, fullData.begin() + end);
+        }
+
+        std::vector<uint8_t> lastResponse;
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            bool isLast = (i == chunks.size() - 1);
+            uint8_t cla = isLast ? 0x00 : 0x10;
+
+            // Build APDU: CLA INS P1 P2 Lc [data] [Le]
+            std::vector<uint8_t> apdu;
+            apdu.push_back(cla);
+            apdu.push_back(0x2A);  // INS: PSO
+            apdu.push_back(0x80);  // P1: return plain
+            apdu.push_back(0x86);  // P2: input encrypted
+            apdu.push_back(static_cast<uint8_t>(chunks[i].size()));  // Lc
+            apdu.insert(apdu.end(), chunks[i].begin(), chunks[i].end());
+            if (isLast) {
+                apdu.push_back(0x00);  // Le: expect max response
+            }
+
+            lastResponse = TransmitAndGetResponse(hCard, apdu, dwActiveProtocol);
+
+            if (lastResponse.size() < 2) {
+                throw std::runtime_error("PSO:DECIPHER response too short.");
+            }
+
+            uint8_t sw1 = lastResponse[lastResponse.size() - 2];
+            uint8_t sw2 = lastResponse[lastResponse.size() - 1];
+
+            if (!isLast) {
+                // Intermediate chunk: expect 90 00
+                if (sw1 != 0x90 || sw2 != 0x00) {
+                    std::ostringstream oss;
+                    oss << "PSO:DECIPHER command chaining failed at chunk " << (i + 1)
+                        << "/" << chunks.size() << " (SW=" << std::hex << (int)sw1 << (int)sw2 << ")";
+                    throw std::runtime_error(oss.str());
+                }
+            } else {
+                // Final chunk: expect 90 00
+                if (sw1 != 0x90 || sw2 != 0x00) {
+                    std::ostringstream oss;
+                    oss << "PSO:DECIPHER failed (SW=" << std::hex << (int)sw1 << (int)sw2 << ")";
+                    throw std::runtime_error(oss.str());
+                }
+            }
+        }
+
+        // Return data without status bytes
+        return std::vector<uint8_t>(lastResponse.begin(), lastResponse.end() - 2);
     }
 
     void NfcsignerPlugin::HandleDecryptData(const flutter::EncodableMap* args, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -605,17 +672,19 @@ void NfcsignerPlugin::HandleMethodCall(
                 throw std::runtime_error("Select Applet failed.");
             }
 
-            auto verify_resp = TransmitAndGetResponse(hCard, CreateVerifyPinCommand(pin), dwActiveProtocol);
+            // Verify PIN with PW1 mode 0x82 for decryption (as per OpenPGP spec)
+            auto verify_cmd = CreateVerifyPinCommand(pin);
+            // Change P2 from 0x81 to 0x82 for decryption operations
+            if (verify_cmd.size() >= 4) {
+                verify_cmd[3] = 0x82;
+            }
+            auto verify_resp = TransmitAndGetResponse(hCard, verify_cmd, dwActiveProtocol);
             if (verify_resp.size() < 2 || verify_resp[verify_resp.size() - 2] != 0x90) {
                 throw std::runtime_error("Verify PIN failed.");
             }
 
-            auto decrypt_resp = TransmitAndGetResponse(hCard, CreateDecipherCommand(encryptedData), dwActiveProtocol);
-            if (decrypt_resp.size() < 2 || decrypt_resp[decrypt_resp.size() - 2] != 0x90) {
-                throw std::runtime_error("Decryption failed.");
-            }
-
-            std::vector<uint8_t> decrypted_data(decrypt_resp.begin(), decrypt_resp.end() - 2);
+            // Use command chaining for large payloads (RSA-2048/4096)
+            auto decrypted_data = SendChainedDecipher(hCard, encryptedData, dwActiveProtocol);
             p_result->Success(flutter::EncodableValue(decrypted_data));
 
         }, std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>(p_result));

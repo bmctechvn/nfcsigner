@@ -23,6 +23,28 @@ object ApduCommandBuilder {
         return byteArrayOf(0x00, 0x2A, p1, p2, lc) + data + byteArrayOf(le)
     }
 
+    /**
+     * Build an INTERNAL AUTHENTICATE command (INS 0x88) for the AUT key.
+     *
+     * Distinct from [createComputeSignatureCommand], which is PSO:CDS (INS 0x2A) on the
+     * SIG key. The OpenPGP AUT key (PKCS#11 id 3) is what TLS client authentication uses,
+     * e.g. OpenVPN `management-external-key`. Requires VERIFY PW1 mode 0x82 beforehand —
+     * see [createVerifyPinDecryptCommand].
+     *
+     * The card applies PKCS#1 v1.5 padding itself, so [data] is the bare DigestInfo.
+     * Inputs over 255 bytes use an extended APDU (Lc = 00 || len_hi || len_lo, Le = 00 00).
+     */
+    fun createInternalAuthenticateCommand(data: ByteArray): ByteArray {
+        return if (data.size > 255) {
+            byteArrayOf(
+                0x00, 0x88.toByte(), 0x00, 0x00,
+                0x00, ((data.size shr 8) and 0xFF).toByte(), (data.size and 0xFF).toByte()
+            ) + data + byteArrayOf(0x00, 0x00)
+        } else {
+            byteArrayOf(0x00, 0x88.toByte(), 0x00, 0x00, data.size.toByte()) + data + byteArrayOf(0x00)
+        }
+    }
+
     fun createGetRsaPublicKeyCommand(keyRole: String): ByteArray {
         val data = when (keyRole) {
             "sig" -> byteArrayOf(0xB6.toByte(), 0x00)

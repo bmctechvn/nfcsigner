@@ -59,6 +59,27 @@ class CardOperationManager(private val transceiver: Transceiver) {
         return response.data
     }
 
+    /**
+     * INTERNAL AUTHENTICATE (INS 0x88) using the AUT key — for TLS client authentication.
+     *
+     * Caller must run [verifyPinForDecrypt] first (PW1 mode 0x82); mode 0x81 used by
+     * [verifyPin] unlocks the SIG key only and will not authorise this operation.
+     *
+     * @param data bare DigestInfo; the card applies PKCS#1 v1.5 padding
+     * @return raw signature (RSA: modulus-sized; ECDSA: r||s, caller converts to DER)
+     */
+    fun internalAuthenticate(data: ByteArray): ByteArray {
+        logger.debug("INTERNAL AUTHENTICATE for ${data.size} bytes")
+        val command = ApduCommandBuilder.createInternalAuthenticateCommand(data)
+        val response = executeCommandWithGetResponse(command)
+
+        if (!response.isSuccess) {
+            throw IOException("INTERNAL AUTHENTICATE failed: SW=${response.sw1.toString(16)}${response.sw2.toString(16)}")
+        }
+
+        return response.data
+    }
+
     fun getRsaPublicKey(keyRole: String): ByteArray {
         logger.debug("Getting RSA public key for role: $keyRole")
         val command = ApduCommandBuilder.createGetRsaPublicKeyCommand(keyRole)

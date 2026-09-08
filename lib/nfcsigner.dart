@@ -65,6 +65,43 @@ class Nfcsigner {
       );
     }
   }
+  /// Ký bằng khóa AUT (Authentication) qua APDU INTERNAL AUTHENTICATE (INS 0x88).
+  ///
+  /// Khác với [generateSignature] — vốn dùng khóa SIG qua PSO:CDS (INS 0x2A, PIN
+  /// mode 0x81) cho ký tài liệu PDF/XML. Hàm này dùng khóa AUT (PKCS#11 id 3,
+  /// PIN mode 0x82), là khóa dành cho xác thực client TLS, ví dụ OpenVPN với
+  /// `management-external-key`.
+  ///
+  /// [dataToSign] là DigestInfo thuần — thẻ tự thêm padding PKCS#1 v1.5.
+  /// Trả về chữ ký thô: RSA là chuỗi bằng kích thước modulus; ECDSA là `r||s`
+  /// (bên gọi tự chuyển sang DER).
+  static Future<ServiceResult<Uint8List>> internalAuthenticate({
+    required String appletID,
+    required String pin,
+    required Uint8List dataToSign,
+  }) async {
+    try {
+      final Map<String, dynamic> arguments = {
+        'appletID': appletID,
+        'pin': pin,
+        'dataToSign': dataToSign,
+      };
+
+      final Uint8List? signature =
+          await _channel.invokeMethod('internalAuthenticate', arguments);
+
+      return ServiceResult.success(signature);
+
+    } on PlatformException catch (e) {
+      return ServiceResult.fromPlatformException(e);
+    } catch (e) {
+      return ServiceResult.failure(
+        status: CardStatus.unknownError,
+        message: e.toString(),
+      );
+    }
+  }
+
   /// Thực hiện chuỗi lệnh ký số XML hoàn chỉnh trên thẻ thông minh.
   ///
   /// Bao gồm các bước: Chọn Applet, Xác thực PIN, và Ký dữ liệu.

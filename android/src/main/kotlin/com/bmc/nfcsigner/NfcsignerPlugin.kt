@@ -122,6 +122,7 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
   private fun executeCommand(cardManager: CardOperationManager, call: MethodCall, result: Result) {
     when (call.method) {
       "generateSignature" -> handleGenerateSignature(cardManager, call, result)
+      "internalAuthenticate" -> handleInternalAuthenticate(cardManager, call, result)
       "getRsaPublicKey" -> handleGetRsaPublicKey(cardManager, call, result)
       "getCertificate" -> handleGetCertificate(cardManager, call, result)
       "signPdf" -> handleSignPdf(cardManager, call, result)
@@ -152,6 +153,38 @@ class NfcsignerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, NfcAdap
       }
 
       val signature = cardManager.generateSignature(dataToSign, keyIndex)
+      result.success(signature)
+
+    } catch (e: Exception) {
+      result.error("COMMUNICATION_ERROR", "Lỗi giao tiếp I/O: ${e.message}", null)
+    }
+  }
+
+  /**
+   * Sign with the AUT key via INTERNAL AUTHENTICATE — for TLS client authentication
+   * (OpenVPN `management-external-key`). Uses PW1 mode 0x82, unlike [handleGenerateSignature]
+   * which uses the SIG key with mode 0x81.
+   */
+  private fun handleInternalAuthenticate(cardManager: CardOperationManager, call: MethodCall, result: Result) {
+    try {
+      val appletID = call.argument<String>("appletID")!!
+      val pin = call.argument<String>("pin")!!
+      val dataToSign = call.argument<ByteArray>("dataToSign")!!
+
+      if (!cardManager.selectApplet(hexStringToByteArray(appletID))) {
+        result.error("APPLET_NOT_SELECTED", "Không thể chọn Applet.", null)
+        return
+      }
+
+      val (pinVerified, triesLeft) = cardManager.verifyPinForDecrypt(pin)
+      if (!pinVerified) {
+        val message = if (triesLeft > 0) "Xác thực PIN thất bại. Còn $triesLeft lần thử."
+        else "Xác thực PIN thất bại."
+        result.error("AUTH_ERROR", message, null)
+        return
+      }
+
+      val signature = cardManager.internalAuthenticate(dataToSign)
       result.success(signature)
 
     } catch (e: Exception) {
